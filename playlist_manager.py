@@ -254,21 +254,61 @@ def register_linked_group(chat_id: int, title: str, chat_type: str = "supergroup
             print(f"[MONGO GRUP HATA] {e}", flush=True)
 
 
-def get_linked_groups() -> list[dict[str, Any]]:
-    merged: dict[int, dict[str, Any]] = dict(LINKED_GROUPS)
+def unregister_linked_group(chat_id: int) -> None:
+    cid = int(chat_id)
+    LINKED_GROUPS.pop(cid, None)
+    for uid, tgt in list(USER_TARGETS.items()):
+        if tgt == cid:
+            USER_TARGETS.pop(uid, None)
     if _groups_col is not None:
+        try:
+            _groups_col.delete_one({"_id": str(cid)})
+        except Exception as e:
+            print(f"[MONGO GRUP SIL HATA] {e}", flush=True)
+
+
+def sync_bot_active_groups(active_groups: list[dict[str, Any]]) -> None:
+    """
+    Yalnizca botun aktif olarak uyesi oldugu gruplari tutar; alakasiz kayitlari temizler.
+    """
+    fresh: dict[int, dict[str, Any]] = {}
+    for g in active_groups:
+        cid = g.get("chat_id")
+        if cid is None:
+            continue
+        ic = int(cid)
+        fresh[ic] = {
+            "chat_id": ic,
+            "title": (g.get("title") or f"Grup {ic}").strip(),
+            "type": g.get("type") or "supergroup",
+        }
+
+    LINKED_GROUPS.clear()
+    LINKED_GROUPS.update(fresh)
+
+    if _groups_col is not None:
+        try:
+            _groups_col.delete_many({})
+            for ic, rec in fresh.items():
+                _groups_col.update_one({"_id": str(ic)}, {"$set": rec}, upsert=True)
+        except Exception as e:
+            print(f"[MONGO GRUP SENK HATA] {e}", flush=True)
+
+
+def get_linked_groups() -> list[dict[str, Any]]:
+    if not LINKED_GROUPS and _groups_col is not None:
         try:
             for doc in _groups_col.find():
                 cid = doc.get("chat_id")
                 if cid is not None:
-                    merged[int(cid)] = {
+                    LINKED_GROUPS[int(cid)] = {
                         "chat_id": int(cid),
                         "title": doc.get("title") or f"Grup {cid}",
                         "type": doc.get("type") or "supergroup",
                     }
         except Exception as e:
             print(f"[MONGO GRUPLAR HATA] {e}", flush=True)
-    return list(merged.values())
+    return list(LINKED_GROUPS.values())
 
 
 def set_user_target_chat(user_id: int, target_chat_id: int) -> None:
@@ -288,14 +328,17 @@ def get_user_target_chat(user_id: int | None, fallback_chat_id: int) -> int:
     if user_id is None:
         return fallback_chat_id
     if int(user_id) in USER_TARGETS:
-        return USER_TARGETS[int(user_id)]
+        tgt = USER_TARGETS[int(user_id)]
+        if tgt in LINKED_GROUPS:
+            return tgt
     if _targets_col is not None:
         try:
             doc = _targets_col.find_one({"_id": str(user_id)})
             if doc and doc.get("target_chat_id") is not None:
                 val = int(doc["target_chat_id"])
-                USER_TARGETS[int(user_id)] = val
-                return val
+                if val in LINKED_GROUPS:
+                    USER_TARGETS[int(user_id)] = val
+                    return val
         except Exception as e:
             print(f"[MONGO HEDEF OKUMA HATA] {e}", flush=True)
     return fallback_chat_id

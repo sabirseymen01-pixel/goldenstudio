@@ -8,16 +8,22 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from config import API_ID, API_HASH, BOT_TOKEN, PORT
+from config import API_ID, API_HASH, BOT_TOKEN, PORT, DOWNLOAD_DIR
 from media_engine import download_media
 from player import (
     assistant,
     call_py,
     play_or_queue,
+    start_or_enqueue,
     skip_track,
     stop_stream,
     NOW_PLAYING,
-    QUEUES,
+)
+from playlist_manager import (
+    LISTS,
+    resolve_input_items,
+    reorder_list,
+    get_list,
 )
 
 bot = Client(
@@ -27,16 +33,50 @@ bot = Client(
     bot_token=BOT_TOKEN,
 )
 
-# Kullanıcının butonla seçtiği aktif mod: user_id -> "audio" | "video" | "mp3" | "mp4"
+# Kullanıcının butonla seçtiği aktif mod: user_id -> "audio" | "video" | "mp3" | "mp4" | "image"
 USER_MODE: dict[int, str] = {}
+
+ALL_COMMANDS = [
+    "start", "studio", "baslat",
+    "play", "oynat",
+    "vplay", "video",
+    "sunum",
+    "liste", "sirala",
+    "mp3", "indir_mp3",
+    "mp4", "indir_mp4",
+    "pause", "duraklat",
+    "resume", "devam",
+    "skip", "atla",
+    "stop", "dur",
+]
 
 
 def format_duration(seconds: int) -> str:
     if not seconds:
-        return "Canlı / Bilinmiyor"
+        return "Canlı / Sunum"
     mins, secs = divmod(int(seconds), 60)
     hours, mins = divmod(mins, 60)
     return f"{hours:02d}:{mins:02d}:{secs:02d}" if hours else f"{mins:02d}:{secs:02d}"
+
+
+def _build_list_text(chat_id: int) -> str:
+    lst = get_list(chat_id)
+    current = NOW_PLAYING.get(chat_id)
+    lines = [
+        "📋 **GOLDEN STUDIO — ÜSTTEN AŞAĞI LİSTE**",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if current:
+        ikon_now = "🖼️" if current.get("kind") == "image" else ("🎬" if current.get("is_video") else "🎵")
+        lines.append(f"▶️ **Şu An Yayında:** {ikon_now} `{current['title']}`")
+    if not lst:
+        lines.append("Sırada bekleyen başka öğe yok.")
+    else:
+        for idx, item in enumerate(lst, 1):
+            ikon = "🖼️" if item.get("kind") == "image" else ("🎬" if item.get("is_video") else "🎵")
+            lines.append(f"**{idx}.** {ikon} `{item['title']}`")
+    lines.append("\n💡 *Sıra değiştirmek için:* `/sirala <eski_no> <yeni_no>` *(Örn: `/sirala 3 1`)*")
+    return "\n".join(lines)
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -45,6 +85,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🎵 Sesli Sohbette Çal", callback_data="mode_audio"),
                 InlineKeyboardButton("🎬 Sesli Sohbette Video Aç", callback_data="mode_video"),
+            ],
+            [
+                InlineKeyboardButton("🖼️ Resim Sunumu", callback_data="mode_image"),
+                InlineKeyboardButton("📋 Liste & Sırala", callback_data="panel_list"),
             ],
             [
                 InlineKeyboardButton("🎧 MP3 İndir (320kbps)", callback_data="mode_mp3"),
@@ -67,8 +111,9 @@ def player_control_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("⏭️ Sıradaki", callback_data="ctrl_skip"),
             ],
             [
-                InlineKeyboardButton("⏹️ Yayını Durdur", callback_data="ctrl_stop"),
-                InlineKeyboardButton("🔙 Ana Stüdyo", callback_data="panel_home"),
+                InlineKeyboardButton("📋 Liste", callback_data="panel_list"),
+                InlineKeyboardButton("⏹️ Durdur", callback_data="ctrl_stop"),
+                InlineKeyboardButton("🔙 Stüdyo", callback_data="panel_home"),
             ],
         ]
     )
@@ -78,15 +123,16 @@ WELCOME_TEXT = (
     "✨ **GOLDEN STUDIO — VIP MEDYA & YAYIN MERKEZİ** ✨\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "Hoş geldiniz. **Golden Studio**, grubunuz ve özel sohbetleriniz için "
-    "stüdyo kalitesinde ses, HD video yayını ve yüksek hızlı medya aktarımı sunar.\n\n"
+    "stüdyo kalitesinde ses, HD video/görsel sunum yayını, liste yönetimi ve yüksek hızlı medya aktarımı sunar.\n\n"
     "🎛️ **Neler Yapabilirsiniz?**\n"
-    "• **Sesli Sohbet Yayını:** Gruptaki sesli sohbette kesintisiz müzik veya video açar.\n"
-    "• **MP3 & MP4 İndirme:** İstediğiniz şarkı veya klibi en yüksek kalitede doğrudan sohbete atar.\n\n"
-    "👇 *Başlamak için aşağıdaki stüdyo butonlarından birini seçin veya doğrudan link/şarkı adı gönderin:*"
+    "• **Sesli Sohbet Yayını:** Şarkı, video, YouTube linki/listesi veya sohbete atılan medya dosyalarını açar.\n"
+    "• **Resim Sunumu:** Gönderilen fotoğrafları sesli sohbette sunum videosuna çevirir.\n"
+    "• **Üstten Aşağı Liste:** `/liste` ve `/sirala` ile sırayı istediğiniz gibi düzenleyin.\n\n"
+    "👇 *Başlamak için aşağıdaki stüdyo butonlarından birini seçin veya doğrudan link/şarkı/dosya gönderin:*"
 )
 
 
-@bot.on_message(filters.command(["start", "studio"]))
+@bot.on_message(filters.command(["start", "studio", "baslat"]))
 async def cmd_start(_, message: Message):
     await message.reply_text(
         WELCOME_TEXT,
@@ -105,16 +151,33 @@ async def handle_callbacks(_, query: CallbackQuery):
         await query.message.edit_text(WELCOME_TEXT, reply_markup=main_menu_keyboard())
         return
 
+    if data == "panel_list":
+        await query.message.edit_text(
+            _build_list_text(chat_id),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("⏭️ Sıradaki", callback_data="ctrl_skip"),
+                        InlineKeyboardButton("🔙 Stüdyo", callback_data="panel_home"),
+                    ]
+                ]
+            ),
+        )
+        return
+
     if data == "panel_help":
         help_text = (
             "📜 **GOLDEN STUDIO — KOMUT REHBERİ**\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🎵 `/play <şarkı veya link>` — Sesli sohbette müzik açar\n"
-            "🎬 `/vplay <video veya link>` — Sesli sohbette video açar\n"
-            "🎧 `/mp3 <şarkı veya link>` — 320kbps MP3 dosyası gönderir\n"
-            "📹 `/mp4 <video veya link>` — 720p MP4 video gönderir\n"
-            "⏸️ `/pause` • ▶️ `/resume` • ⏭️ `/skip` • ⏹️ `/stop`\n\n"
-            "💡 *İpucu:* Stüdyo butonlarından bir mod seçtikten sonra sadece şarkı adını veya linkini yazmanız yeterlidir."
+            "🎵 `/oynat` veya `/play <şarkı/link/liste>` — Sesli sohbette çalar veya listeye ekler\n"
+            "🎬 `/video` veya `/vplay <video/link>` — Sesli sohbette video açar\n"
+            "🖼️ `/sunum` — Yanıtlanan fotoğrafı görsel sunum olarak açar\n"
+            "📋 `/liste` — Üstten aşağı listeyi gösterir\n"
+            "🔢 `/sirala <eski_no> <yeni_no>` — Sırayı değiştirir (Örn: `/sirala 3 1`)\n"
+            "🎧 `/indir_mp3` veya `/mp3 <şarkı/link>` — 320kbps MP3 gönderir\n"
+            "📹 `/indir_mp4` veya `/mp4 <video/link>` — 720p MP4 gönderir\n"
+            "⏸️ `/duraklat` • ▶️ `/devam` • ⏭️ `/atla` • ⏹️ `/dur`\n\n"
+            "💡 *İpucu:* Sohbete doğrudan ses, video veya fotoğraf atarak da oynatabilir ya da listeye ekleyebilirsiniz."
         )
         await query.message.edit_text(
             help_text,
@@ -126,11 +189,11 @@ async def handle_callbacks(_, query: CallbackQuery):
 
     if data == "panel_controls":
         current = NOW_PLAYING.get(chat_id)
-        q_len = len(QUEUES.get(chat_id, []))
+        q_len = len(LISTS.get(chat_id, []))
         status_line = (
             f"🎶 **Şu An Yayında:** `{current['title']}`\n"
-            f"📡 **Mod:** {'🎬 Video Yayını' if current['is_video'] else '🎵 Stüdyo Ses'}\n"
-            f"📑 **Sıradaki Parça Sayısı:** `{q_len}`"
+            f"📡 **Mod:** {'🎬 Video / Sunum Yayını' if current.get('is_video') else '🎵 Stüdyo Ses'}\n"
+            f"📑 **Sıradaki Öğe Sayısı:** `{q_len}`"
             if current
             else "🔇 *Şu anda aktif bir sesli sohbet yayını bulunmuyor.*"
         )
@@ -147,14 +210,17 @@ async def handle_callbacks(_, query: CallbackQuery):
         labels = {
             "audio": "🎵 **Sesli Sohbette Müzik Yayını**",
             "video": "🎬 **Sesli Sohbette Video Yayını**",
+            "image": "🖼️ **Görsel Sunum Yayını**",
             "mp3": "🎧 **320kbps MP3 İndirme**",
             "mp4": "📹 **720p MP4 Video İndirme**",
         }
-        await query.answer("Mod seçildi!", show_alert=False)
-        await query.message.reply_text(
-            f"✅ Aktif Mod: {labels[mode]}\n"
-            f"✍️ Şimdi **şarkı adını** veya **YouTube/medya linkini** yazıp gönderin:"
+        hint = (
+            "✍️ Şimdi bir **fotoğraf** gönderin:"
+            if mode == "image"
+            else "✍️ Şimdi **şarkı adını**, **YouTube bağlantısını/listesini** veya **medya dosyasını** gönderin:"
         )
+        await query.answer("Mod seçildi!", show_alert=False)
+        await query.message.reply_text(f"✅ Aktif Mod: {labels[mode]}\n{hint}")
         return
 
     if data == "ctrl_pause":
@@ -172,13 +238,13 @@ async def handle_callbacks(_, query: CallbackQuery):
     elif data == "ctrl_skip":
         nxt = await skip_track(chat_id)
         if nxt:
-            await query.message.reply_text(f"⏭️ Sıradaki parçaya geçildi: **{nxt['title']}**")
+            await query.message.reply_text(f"⏭️ Sıradaki öğeye geçildi: **{nxt['title']}**")
         else:
-            await query.message.reply_text("⏹️ Sırada başka parça kalmadı, yayın sonlandırıldı.")
+            await query.message.reply_text("⏹️ Sırada başka öğe kalmadı, yayın sonlandırıldı.")
         await query.answer()
     elif data == "ctrl_stop":
         await stop_stream(chat_id)
-        await query.message.reply_text("⏹️ **Golden Studio** yayını durduruldu ve sıradaki liste temizlendi.")
+        await query.message.reply_text("⏹️ **Golden Studio** yayını durduruldu ve liste temizlendi.")
         await query.answer()
 
 
@@ -190,18 +256,20 @@ async def _process_stream_request(message: Message, query_text: str, is_video: b
         )
         return
 
-    wait_msg = await message.reply_text("⏳ **Golden Studio** akışı hazırlıyor, lütfen bekleyin...")
+    wait_msg = await message.reply_text("⏳ **Golden Studio** akışı ve listeyi hazırlıyor, lütfen bekleyin...")
     try:
         requester = message.from_user.first_name if message.from_user else "Üye"
         status, track = await play_or_queue(message.chat.id, query_text, is_video, requester)
-        dur = format_duration(track["duration"])
+        dur = format_duration(track.get("duration", 0))
         kind = "🎬 HD Video Yayını" if is_video else "🎵 Stüdyo Ses Yayını"
 
         if status == "playing":
+            url = track.get("webpage_url") or query_text
+            title_md = f"[{track['title']}]({url})" if url.startswith(("http://", "https://")) else f"`{track['title']}`"
             await wait_msg.edit_text(
                 f"✨ **GOLDEN STUDIO — YAYINDA**\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎶 **Parça:** [{track['title']}]({track['webpage_url']})\n"
+                f"🎶 **Parça:** {title_md}\n"
                 f"⏱️ **Süre:** `{dur}`\n"
                 f"📡 **Format:** {kind}\n"
                 f"👤 **İsteyen:** {requester}",
@@ -209,9 +277,9 @@ async def _process_stream_request(message: Message, query_text: str, is_video: b
                 disable_web_page_preview=True,
             )
         else:
-            q_pos = len(QUEUES.get(message.chat.id, []))
+            q_pos = track.get("queue_position") or len(LISTS.get(message.chat.id, []))
             await wait_msg.edit_text(
-                f"📑 **Sıraya Eklendi (#{q_pos})**\n"
+                f"📑 **Listeye Eklendi (#{q_pos})**\n"
                 f"🎶 **Parça:** `{track['title']}` (`{dur}`)\n"
                 f"📡 **Format:** {kind}",
                 reply_markup=player_control_keyboard(),
@@ -256,43 +324,117 @@ async def _process_download_request(message: Message, query_text: str, mode: str
                 pass
 
 
-# --- KOMUTLAR ---
+async def _handle_media_message(message: Message):
+    if message.chat.type.value == "private":
+        await message.reply_text("ℹ️ Medya dosyalarını sesli sohbette açmak veya listeye eklemek için grupta gönderin.")
+        return
+
+    requester = message.from_user.first_name if message.from_user else "Üye"
+    chat_id = message.chat.id
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+    if message.photo:
+        local_path = await message.download(file_name=os.path.join(DOWNLOAD_DIR, ""))
+        items = await resolve_input_items(local_path, mode="image", requested_by=requester)
+        status, track = await start_or_enqueue(chat_id, items)
+        if status == "playing":
+            await message.reply_text(
+                f"🖼️ **Görsel Sunum Yayında:** `{track['title']}`",
+                reply_markup=player_control_keyboard(),
+            )
+        else:
+            await message.reply_text(
+                f"📑 **Görsel Sunum Listeye Eklendi (#{track.get('queue_position', len(LISTS.get(chat_id, [])))}):** `{track['title']}`",
+                reply_markup=player_control_keyboard(),
+            )
+        return
+
+    if message.video or message.audio or message.voice or message.document:
+        media_obj = message.video or message.audio or message.voice or message.document
+        mime = getattr(media_obj, "mime_type", "") or ""
+        is_vid = bool(message.video) or mime.startswith("video/")
+        is_aud = bool(message.audio or message.voice) or mime.startswith("audio/")
+
+        if not (is_vid or is_aud):
+            return
+
+        local_path = await message.download(file_name=os.path.join(DOWNLOAD_DIR, ""))
+        items = await resolve_input_items(local_path, mode="video" if is_vid else "audio", requested_by=requester)
+        status, track = await start_or_enqueue(chat_id, items)
+        ikon = "🎬" if is_vid else "🎵"
+        if status == "playing":
+            await message.reply_text(
+                f"✨ {ikon} **Dosya Yayında:** `{track['title']}`",
+                reply_markup=player_control_keyboard(),
+            )
+        else:
+            await message.reply_text(
+                f"📑 {ikon} **Dosya Listeye Eklendi (#{track.get('queue_position', len(LISTS.get(chat_id, [])))}):** `{track['title']}`",
+                reply_markup=player_control_keyboard(),
+            )
+
+
+# --- KOMUTLAR (TÜRKÇE & İNGİLİZCE) ---
 
 @bot.on_message(filters.command(["play", "oynat"]))
 async def cmd_play(_, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("Kullanım: `/play <şarkı adı veya link>`")
+        return await message.reply_text("Kullanım: `/oynat <şarkı adı, YouTube linki veya oynatma listesi>`")
     await _process_stream_request(message, message.text.split(None, 1)[1], is_video=False)
 
 
 @bot.on_message(filters.command(["vplay", "video"]))
 async def cmd_vplay(_, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("Kullanım: `/vplay <video adı veya link>`")
+        return await message.reply_text("Kullanım: `/video <video adı veya YouTube linki>`")
     await _process_stream_request(message, message.text.split(None, 1)[1], is_video=True)
 
 
-@bot.on_message(filters.command(["mp3"]))
+@bot.on_message(filters.command(["sunum"]))
+async def cmd_sunum(_, message: Message):
+    target = message.reply_to_message if message.reply_to_message and message.reply_to_message.photo else message
+    if not target.photo:
+        return await message.reply_text("Bir fotoğrafı yanıtlayıp `/sunum` yazın veya doğrudan fotoğraf gönderin.")
+    await _handle_media_message(target)
+
+
+@bot.on_message(filters.command(["liste"]))
+async def cmd_liste(_, message: Message):
+    await message.reply_text(
+        _build_list_text(message.chat.id),
+        reply_markup=player_control_keyboard(),
+    )
+
+
+@bot.on_message(filters.command(["sirala"]))
+async def cmd_sirala(_, message: Message):
+    if len(message.command) < 3 or not message.command[1].isdigit() or not message.command[2].isdigit():
+        return await message.reply_text("Kullanım: `/sirala <eski_sıra> <yeni_sıra>` *(Örn: `/sirala 3 1`)*")
+    ok, info_msg = reorder_list(message.chat.id, int(message.command[1]), int(message.command[2]))
+    await message.reply_text(info_msg if ok else f"⚠️ {info_msg}")
+
+
+@bot.on_message(filters.command(["mp3", "indir_mp3"]))
 async def cmd_mp3(_, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("Kullanım: `/mp3 <şarkı adı veya link>`")
+        return await message.reply_text("Kullanım: `/indir_mp3 <şarkı adı veya link>`")
     await _process_download_request(message, message.text.split(None, 1)[1], mode="mp3")
 
 
-@bot.on_message(filters.command(["mp4"]))
+@bot.on_message(filters.command(["mp4", "indir_mp4"]))
 async def cmd_mp4(_, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("Kullanım: `/mp4 <video adı veya link>`")
+        return await message.reply_text("Kullanım: `/indir_mp4 <video adı veya link>`")
     await _process_download_request(message, message.text.split(None, 1)[1], mode="mp4")
 
 
-@bot.on_message(filters.command(["pause"]))
+@bot.on_message(filters.command(["pause", "duraklat"]))
 async def cmd_pause(_, message: Message):
     await call_py.pause_stream(message.chat.id)
     await message.reply_text("⏸️ Yayın duraklatıldı.")
 
 
-@bot.on_message(filters.command(["resume"]))
+@bot.on_message(filters.command(["resume", "devam"]))
 async def cmd_resume(_, message: Message):
     await call_py.resume_stream(message.chat.id)
     await message.reply_text("▶️ Yayın devam ediyor.")
@@ -302,7 +444,7 @@ async def cmd_resume(_, message: Message):
 async def cmd_skip(_, message: Message):
     nxt = await skip_track(message.chat.id)
     if nxt:
-        await message.reply_text(f"⏭️ Sıradaki parçaya geçildi: **{nxt['title']}**")
+        await message.reply_text(f"⏭️ Sıradaki öğeye geçildi: **{nxt['title']}**")
     else:
         await message.reply_text("⏹️ Sıra bitti, yayın kapatıldı.")
 
@@ -310,30 +452,37 @@ async def cmd_skip(_, message: Message):
 @bot.on_message(filters.command(["stop", "dur"]))
 async def cmd_stop(_, message: Message):
     await stop_stream(message.chat.id)
-    await message.reply_text("⏹️ **Golden Studio** yayını durduruldu.")
+    await message.reply_text("⏹️ **Golden Studio** yayını durduruldu ve liste temizlendi.")
+
+
+# --- DOĞRUDAN ATILAN FOTOĞRAF / VİDEO / SES DOSYALARI ---
+
+@bot.on_message(filters.photo | filters.video | filters.audio | filters.voice)
+async def on_uploaded_media(_, message: Message):
+    await _handle_media_message(message)
 
 
 # --- BUTONLA MOD SEÇİLDİKTEN SONRA GELEN MESAJLARI YAKALAMA ---
 
-@bot.on_message(filters.text & ~filters.command(["start", "studio", "play", "oynat", "vplay", "video", "mp3", "mp4", "pause", "resume", "skip", "atla", "stop", "dur"]))
+@bot.on_message(filters.text & ~filters.command(ALL_COMMANDS))
 async def handle_mode_input(_, message: Message):
     if not message.from_user:
         return
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # Kullanıcı butona bastıysa seçtiği modda çalıştır
     if user_id in USER_MODE:
         mode = USER_MODE.pop(user_id)
         if mode == "audio":
             await _process_stream_request(message, text, is_video=False)
         elif mode == "video":
             await _process_stream_request(message, text, is_video=True)
+        elif mode == "image":
+            await message.reply_text("🖼️ Görsel sunum için lütfen bir fotoğraf gönderin veya fotoğrafa yanıt verip `/sunum` yazın.")
         elif mode in ("mp3", "mp4"):
             await _process_download_request(message, text, mode=mode)
         return
 
-    # Özel sohbette doğrudan link atılırsa otomatik MP3/MP4 seçeneği sun
     if message.chat.type.value == "private" and text.startswith(("http://", "https://")):
         USER_MODE[user_id] = "mp3"
         await message.reply_text(
@@ -361,6 +510,7 @@ async def start_web_server():
 
 
 async def main():
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     await start_web_server()
     await bot.start()
     await assistant.start()

@@ -3,8 +3,8 @@ import os
 import tempfile
 from config import DOWNLOAD_DIR
 
-STREAM_WIDTH = int(os.getenv("STREAM_WIDTH", "1920"))
-STREAM_HEIGHT = int(os.getenv("STREAM_HEIGHT", "1080"))
+STREAM_WIDTH = int(os.getenv("STREAM_WIDTH", "1280"))
+STREAM_HEIGHT = int(os.getenv("STREAM_HEIGHT", "720"))
 STREAM_FPS = int(os.getenv("STREAM_FPS", "24"))
 
 
@@ -35,9 +35,6 @@ async def _run_ffmpeg(args: list[str], timeout_sec: int = 180) -> None:
 
 
 async def prepare_image_presentation(image_path: str, duration_sec: int = 30) -> str:
-    """
-    Tek gorselden akici MP4 sunum videosu uretir.
-    """
     if not image_path or not os.path.exists(image_path):
         raise FileNotFoundError("Gorsel dosyasi bulunamadi.")
 
@@ -61,9 +58,9 @@ async def prepare_image_presentation(image_path: str, duration_sec: int = 30) ->
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-tune", "stillimage",
-            "-b:v", "2200k",
-            "-maxrate", "2500k",
-            "-bufsize", "4000k",
+            "-b:v", "1800k",
+            "-maxrate", "2200k",
+            "-bufsize", "3600k",
             "-c:a", "aac",
             "-b:a", "128k",
             "-t", str(dur),
@@ -76,9 +73,6 @@ async def prepare_image_presentation(image_path: str, duration_sec: int = 30) ->
 
 
 async def prepare_slideshow_presentation(image_paths: list[str], seconds_per_slide: int = 6) -> str:
-    """
-    Birden fazla gorselden concat demuxer ile akici slayt MP4 uretir.
-    """
     valid = [p for p in (image_paths or []) if p and os.path.exists(p)]
     if not valid:
         raise FileNotFoundError("Slayt icin gecerli gorsel bulunamadi.")
@@ -93,7 +87,6 @@ async def prepare_slideshow_presentation(image_paths: list[str], seconds_per_sli
             safe_img = img.replace("'", "'\\''")
             tf.write(f"file '{safe_img}'\n")
             tf.write(f"duration {per_slide}\n")
-        # concat demuxer son kare icin bir kez daha dosya ister
         last_img = valid[:25][-1].replace("'", "'\\''")
         tf.write(f"file '{last_img}'\n")
 
@@ -113,9 +106,9 @@ async def prepare_slideshow_presentation(image_paths: list[str], seconds_per_sli
                 "-vf", vf,
                 "-c:v", "libx264",
                 "-preset", "veryfast",
-                "-b:v", "2200k",
-                "-maxrate", "2500k",
-                "-bufsize", "4000k",
+                "-b:v", "1800k",
+                "-maxrate", "2200k",
+                "-bufsize", "3600k",
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-shortest",

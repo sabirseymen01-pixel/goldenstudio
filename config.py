@@ -17,7 +17,7 @@ SESSION_STRING: str = os.getenv("SESSION_STRING", "").strip()
 # Render port ayarı (UptimeRobot / Healthcheck için)
 PORT: int = _int_env("PORT", 8080)
 
-# İsteğe bağlı: Admin kullanıcı ID'leri (virgülle ayrılmış, örn: 123456789,987654321)
+# İsteğe bağlı: Admin kullanıcı ID'leri (virgülle ayrılmış)
 _admins = os.getenv("ADMIN_IDS", "").strip()
 ADMIN_IDS: list[int] = [int(x.strip()) for x in _admins.split(",") if x.strip().isdigit()]
 

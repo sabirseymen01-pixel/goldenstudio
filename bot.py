@@ -15,8 +15,11 @@ from player import (
     stop_stream,
     pause_stream,
     resume_stream,
+    get_chat_volume,
+    set_chat_volume,
     NOW_PLAYING,
 )
+import player as _player_mod
 from playlist_manager import (
     LISTS,
     resolve_input_items,
@@ -87,24 +90,57 @@ def _track_chat_if_group(msg: dict[str, Any]) -> None:
     cid = chat.get("id")
     ctype = chat.get("type") or ""
     if cid and ctype in ("group", "supergroup", "channel"):
-        register_linked_group(int(cid), chat.get("title") or f"Grup {cid}", ctype)
+        title = chat.get("title") or chat.get("username") or f"Grup {cid}"
+        register_linked_group(int(cid), title, ctype)
+
+
+async def _sync_assistant_dialogs() -> None:
+    client = getattr(_player_mod, "assistant", None)
+    if client is None:
+        return
+    try:
+        async for dialog in client.get_dialogs():
+            chat = getattr(dialog, "chat", None)
+            if chat is None:
+                continue
+            ctype = str(getattr(chat, "type", "") or "").lower()
+            if any(k in ctype for k in ("group", "supergroup", "channel")):
+                cid = getattr(chat, "id", None)
+                title = getattr(chat, "title", None) or getattr(chat, "first_name", None) or f"Grup {cid}"
+                if cid:
+                    register_linked_group(int(cid), str(title), ctype)
+    except Exception as e:
+        print(f"[DIALOG TARAMA UYARI] {e}", flush=True)
+
+
+def _get_group_name(chat_id: int) -> str:
+    for g in get_linked_groups():
+        if int(g.get("chat_id", 0)) == int(chat_id):
+            return str(g.get("title") or chat_id)
+    return str(chat_id)
 
 
 WELCOME_TEXT = (
     "✨ <b>GOLDEN STUDIO — VIP MEDYA & YAYIN MERKEZI</b> ✨\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "Dogrudan dosya gondererek veya <b>mesaja yanit vererek</b> sesli sohbete yayin aktarabilirsiniz.\n\n"
+    "Once <b>Bagli Gruplar</b> butonundan veya <code>/hedefler</code> ile hedef grubu secin; "
+    "ardindan dogrudan dosya gonderin veya mesaja yanit vererek yayin baslatin.\n\n"
     "🎛️ <b>Hizli Kullanim:</b>\n"
-    "• <b>Yanitla:</b> Ses/video/fotografa yanit verip <code>/oynat</code>, <code>/video</code>, <code>/sunum</code>, <code>/slayt</code> veya <code>/kaydet</code> yazin.\n"
-    "• <b>Hedef Grup Secimi:</b> <code>/hedefler</code> ile bagli gruplari gorup tek tikla secin.\n"
-    "• <b>Kolay Liste:</b> <code>/liste</code> altindaki butonlarla sirayi yukari/asagi tasiyin veya <code>/sirala 3 1</code> kullanin.\n\n"
-    "👇 <i>Asagidan bir mod veya panel secin:</i>"
+    "• <b>Hedef Grup Sec:</b> <code>/hedefler</code> -> grup ismine tiklayin (Orn: <code>Golden Gay Chat</code>).\n"
+    "• <b>Dosya / Yanitla:</b> MP3/MP4/fotograf gonderin veya yanitlayip <code>/oynat</code>, <code>/video</code>, <code>/sunum</code>, <code>/slayt</code>, <code>/kaydet</code> yazin.\n"
+    "• <b>Ses Seviyesi:</b> <code>/ses 0-200</code> veya kontrol butonlari.\n"
+    "• <b>Kolay Liste:</b> <code>/liste</code> altindaki butonlarla sirayi degistirin veya <code>/sirala 3 1</code> yazin.\n\n"
+    "👇 <i>Asagidan bir secenek belirleyin:</i>"
 )
 
 
 def main_menu_markup() -> dict[str, Any]:
     return {
         "inline_keyboard": [
+            [
+                {"text": "🎯 Bagli Gruplar", "callback_data": "panel_targets"},
+                {"text": "📋 Liste & Duzenle", "callback_data": "panel_list"},
+            ],
             [
                 {"text": "🎵 Ses Yayini", "callback_data": "mode_audio"},
                 {"text": "🎬 Video Yayini", "callback_data": "mode_video"},
@@ -114,11 +150,7 @@ def main_menu_markup() -> dict[str, Any]:
                 {"text": "🎞️ Slayt Baslat", "callback_data": "mode_slide"},
             ],
             [
-                {"text": "🎯 Bagli Gruplar", "callback_data": "panel_targets"},
                 {"text": "💾 Kayitli Sarkilar", "callback_data": "panel_catalog"},
-            ],
-            [
-                {"text": "📋 Liste & Duzenle", "callback_data": "panel_list"},
                 {"text": "🎛️ Canli Kontrol", "callback_data": "panel_controls"},
             ],
         ]
@@ -128,6 +160,11 @@ def main_menu_markup() -> dict[str, Any]:
 def player_control_markup() -> dict[str, Any]:
     return {
         "inline_keyboard": [
+            [
+                {"text": "🔉 -20%", "callback_data": "vol_down"},
+                {"text": "🔊 +20%", "callback_data": "vol_up"},
+                {"text": "🔇 Sessiz", "callback_data": "vol_mute"},
+            ],
             [
                 {"text": "⏸️ Duraklat", "callback_data": "ctrl_pause"},
                 {"text": "▶️ Devam Et", "callback_data": "ctrl_resume"},
@@ -180,18 +217,40 @@ def list_editor_markup(chat_id: int, user_id: int | None) -> dict[str, Any]:
 def target_groups_markup(user_id: int | None, active_target: int) -> dict[str, Any]:
     groups = get_linked_groups()
     rows: list[list[dict[str, str]]] = []
-    for g in groups[:10]:
+    for g in groups[:12]:
         gid = int(g["chat_id"])
-        title = str(g.get("title") or gid)[:28]
-        prefix = "✅ " if gid == active_target else "📡 "
+        title = str(g.get("title") or gid)[:32]
+        prefix = "✅ " if gid == active_target else "👥 "
         rows.append([{"text": f"{prefix}{title}", "callback_data": f"tgt_set_{gid}"}])
     rows.append(
         [
+            {"text": "🔄 Gruplari Tara", "callback_data": "tgt_refresh"},
             {"text": "📋 Liste", "callback_data": "panel_list"},
             {"text": "🔙 Studyo", "callback_data": "panel_home"},
         ]
     )
     return {"inline_keyboard": rows}
+
+
+def _build_targets_panel_text(active_target: int) -> str:
+    groups = get_linked_groups()
+    active_name = _get_group_name(active_target) if active_target else "Secilmedi"
+    lines = [
+        "🎯 <b>BAGLI GRUPLAR & YAYIN HEDEFI</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"✅ <b>Secili Grup:</b> <b>{active_name}</b> <code>({active_target})</code>",
+        "",
+    ]
+    if not groups:
+        lines.append("Henuz kayitli grup gorunmuyor. Asistanin gruba ekli oldugundan emin olup <b>Gruplari Tara</b> butonuna basin.")
+    else:
+        lines.append("Asagidaki grup isimlerinden birine tiklayarak hedefi secin, sonra dosyanizi gonderin:")
+        for idx, g in enumerate(groups[:12], 1):
+            gid = int(g["chat_id"])
+            gname = str(g.get("title") or gid)
+            mark = " ✅" if gid == active_target else ""
+            lines.append(f"<b>{idx}.</b> {gname}{mark}")
+    return "\n".join(lines)
 
 
 def format_duration(seconds: int) -> str:
@@ -217,8 +276,9 @@ def _build_list_text(chat_id: int, user_id: int | None = None) -> str:
     lst = get_list(chat_id)
     current = NOW_PLAYING.get(chat_id)
     sel = SELECTED_LIST_IDX.get(user_id or 0, 1)
+    gname = _get_group_name(chat_id)
     lines = [
-        "📋 <b>GOLDEN STUDIO — USTTEN ASAGI LISTE</b>",
+        f"📋 <b>LISTE — {gname}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     if current:
@@ -336,7 +396,7 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
         await send_msg(
             http,
             reply_chat_id,
-            "⚠️ Once <code>/hedefler</code> ile bir hedef grup secin veya grupta dogrudan dosya/komut gonderin.",
+            "⚠️ Once <code>/hedefler</code> ile bir grup secin veya grupta dogrudan dosya/komut gonderin.",
             reply_to_message_id=msg_id,
         )
         return
@@ -355,13 +415,15 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
             status, track = await maybe_await(play_or_queue(target_chat_id, query_text, is_video, requester))
             dur = format_duration(track.get("duration", 0))
             kind = "🎬 Video" if is_video else "🎵 Ses"
-            hedef_not = f"\n📡 <b>Hedef Grup:</b> <code>{target_chat_id}</code>" if target_chat_id != reply_chat_id else ""
+            vol = get_chat_volume(target_chat_id)
+            gname = _get_group_name(target_chat_id)
+            hedef_not = f"\n📡 <b>Hedef Grup:</b> <b>{gname}</b>" if target_chat_id != reply_chat_id else ""
             if status == "playing":
                 text = (
                     f"✨ <b>GOLDEN STUDIO — YAYINDA</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🎶 <b>Parca:</b> <code>{track['title']}</code>\n"
-                    f"⏱️ <b>Sure:</b> <code>{dur}</code> • {kind}\n"
+                    f"⏱️ <b>Sure:</b> <code>{dur}</code> • {kind} • 🔊 <code>%{vol}</code>\n"
                     f"👤 <b>Isteyen:</b> {requester}{hedef_not}"
                 )
             else:
@@ -401,10 +463,11 @@ async def _finalize_slideshow(http: Any, reply_chat_id: int, target_chat_id: int
             "requested_by": requester,
         }
         status, track = await maybe_await(start_or_enqueue(target_chat_id, [item]))
+        gname = _get_group_name(target_chat_id)
         msg_txt = (
-            f"🎞️ <b>Slayt Yayinda:</b> <code>{track['title']}</code>"
+            f"🎞️ <b>Slayt Yayinda ({gname}):</b> <code>{track['title']}</code>"
             if status == "playing"
-            else f"📑 <b>Slayt Listeye Eklendi:</b> <code>{track['title']}</code>"
+            else f"📑 <b>Slayt Listeye Eklendi ({gname}):</b> <code>{track['title']}</code>"
         )
         if wait_id:
             await edit_msg(http, reply_chat_id, wait_id, msg_txt, reply_markup=player_control_markup())
@@ -441,10 +504,13 @@ async def _handle_media_message(
         await send_msg(
             http,
             reply_chat_id,
-            "ℹ️ Medyayi bir grubun sesli sohbetine aktarmak icin once <code>/hedefler</code> ile hedef grup secin veya grupta paylasin.",
+            "ℹ️ Medyayi bir grubun sesli sohbetine aktarmak icin once <code>/hedefler</code> ile grup secin.",
             reply_to_message_id=target_reply_id,
         )
         return
+
+    gname = _get_group_name(target_chat_id)
+    hedef_ek = f" (<b>{gname}</b>)" if target_chat_id != reply_chat_id else ""
 
     try:
         if msg.get("photo"):
@@ -469,13 +535,13 @@ async def _handle_media_message(
             )
             status, track = await maybe_await(start_or_enqueue(target_chat_id, items))
             if status == "playing":
-                await send_msg(http, reply_chat_id, f"🖼️ <b>Gorsel Sunum Yayinda:</b> <code>{track['title']}</code>", reply_markup=player_control_markup(), reply_to_message_id=target_reply_id)
+                await send_msg(http, reply_chat_id, f"🖼️ <b>Gorsel Sunum Yayinda{hedef_ek}:</b> <code>{track['title']}</code>", reply_markup=player_control_markup(), reply_to_message_id=target_reply_id)
             else:
                 q_pos = track.get("queue_position") or len(LISTS.get(target_chat_id, []))
                 await send_msg(
                     http,
                     reply_chat_id,
-                    f"📑 <b>Gorsel Sunum Listeye Eklendi (#{q_pos}):</b> <code>{track['title']}</code>",
+                    f"📑 <b>Gorsel Sunum Listeye Eklendi (#{q_pos}){hedef_ek}:</b> <code>{track['title']}</code>",
                     reply_markup=player_control_markup(),
                     reply_to_message_id=target_reply_id,
                 )
@@ -514,13 +580,13 @@ async def _handle_media_message(
             status, track = await maybe_await(start_or_enqueue(target_chat_id, items))
             ikon = "🎬" if is_vid else "🎵"
             if status == "playing":
-                await send_msg(http, reply_chat_id, f"✨ {ikon} <b>Dosya Yayinda:</b> <code>{track['title']}</code>", reply_markup=player_control_markup(), reply_to_message_id=target_reply_id)
+                await send_msg(http, reply_chat_id, f"✨ {ikon} <b>Dosya Yayinda{hedef_ek}:</b> <code>{track['title']}</code>", reply_markup=player_control_markup(), reply_to_message_id=target_reply_id)
             else:
                 q_pos = track.get("queue_position") or len(LISTS.get(target_chat_id, []))
                 await send_msg(
                     http,
                     reply_chat_id,
-                    f"📑 {ikon} <b>Dosya Listeye Eklendi (#{q_pos}):</b> <code>{track['title']}</code>",
+                    f"📑 {ikon} <b>Dosya Listeye Eklendi (#{q_pos}){hedef_ek}:</b> <code>{track['title']}</code>",
                     reply_markup=player_control_markup(),
                     reply_to_message_id=target_reply_id,
                 )
@@ -553,14 +619,45 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
         await answer_cb(http, cq_id)
         return
 
-    if data == "panel_targets":
-        txt = (
-            "🎯 <b>BAGLI GRUPLAR & YAYIN HEDEFI</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Aktif Hedef Grup ID: <code>{active_chat}</code>\n"
-            "Bir gruba tiklayarak yayinlarinizi o grubun sesli sohbetine yonlendirin:"
+    if data == "tgt_refresh":
+        await _sync_assistant_dialogs()
+        active_chat = get_user_target_chat(user_id, chat_id)
+        await edit_msg(
+            http,
+            chat_id,
+            msg_id,
+            _build_targets_panel_text(active_chat),
+            reply_markup=target_groups_markup(user_id, active_chat),
         )
-        await edit_msg(http, chat_id, msg_id, txt, reply_markup=target_groups_markup(user_id, active_chat))
+        await answer_cb(http, cq_id, "Gruplar guncellendi!")
+        return
+
+    if data == "vol_down":
+        new_vol = await set_chat_volume(active_chat, get_chat_volume(active_chat) - 20)
+        await answer_cb(http, cq_id, f"🔉 Ses: %{new_vol}")
+        return
+
+    if data == "vol_up":
+        new_vol = await set_chat_volume(active_chat, get_chat_volume(active_chat) + 20)
+        await answer_cb(http, cq_id, f"🔊 Ses: %{new_vol}")
+        return
+
+    if data == "vol_mute":
+        cur_vol = get_chat_volume(active_chat)
+        new_vol = await set_chat_volume(active_chat, 100 if cur_vol == 0 else 0)
+        await answer_cb(http, cq_id, f"🔇 Ses: %{new_vol}")
+        return
+
+    if data == "panel_targets":
+        await _sync_assistant_dialogs()
+        active_chat = get_user_target_chat(user_id, chat_id)
+        await edit_msg(
+            http,
+            chat_id,
+            msg_id,
+            _build_targets_panel_text(active_chat),
+            reply_markup=target_groups_markup(user_id, active_chat),
+        )
         await answer_cb(http, cq_id)
         return
 
@@ -572,14 +669,15 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
             return
         if user_id:
             set_user_target_chat(user_id, tgt_id)
+        gname = _get_group_name(tgt_id)
         await edit_msg(
             http,
             chat_id,
             msg_id,
-            f"✅ Aktif yayin hedefi guncellendi: <code>{tgt_id}</code>",
+            f"✅ Secili grup: <b>{gname}</b> <code>({tgt_id})</code>\nSimdi dosyanizi gonderebilir veya komut kullanabilirsiniz.",
             reply_markup=target_groups_markup(user_id, tgt_id),
         )
-        await answer_cb(http, cq_id, f"Hedef grup secildi: {tgt_id}")
+        await answer_cb(http, cq_id, f"Secildi: {gname}")
         return
 
     if data == "panel_catalog":
@@ -644,12 +742,15 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
     if data == "panel_controls":
         current = NOW_PLAYING.get(active_chat)
         q_len = len(LISTS.get(active_chat, []))
+        vol = get_chat_volume(active_chat)
+        gname = _get_group_name(active_chat)
         status_line = (
             f"🎶 <b>Yayinda:</b> <code>{current['title']}</code>\n"
-            f"📡 <b>Hedef:</b> <code>{active_chat}</code>\n"
+            f"🔊 <b>Ses Seviyesi:</b> <code>%{vol}</code>\n"
+            f"📡 <b>Hedef:</b> <b>{gname}</b>\n"
             f"📑 <b>Siradaki Oge:</b> <code>{q_len}</code>"
             if current
-            else f"🔇 <i>Aktif yayin yok.</i>\n📡 <b>Hedef:</b> <code>{active_chat}</code>"
+            else f"🔇 <i>Aktif yayin yok.</i>\n🔊 <b>Ses Seviyesi:</b> <code>%{vol}</code>\n📡 <b>Hedef:</b> <b>{gname}</b>"
         )
         await edit_msg(
             http,
@@ -730,18 +831,34 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
         first_token = text.split(None, 1)[0][1:].split("@")[0].lower()
         arg_str = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
 
+        if first_token in ("ses", "volume", "vol"):
+            if not arg_str or not arg_str.isdigit():
+                cur_v = get_chat_volume(target_chat_id)
+                await send_msg(
+                    http,
+                    chat_id,
+                    f"🔊 Mevcut ses seviyesi: <code>%{cur_v}</code>\nAyarlamak icin: <code>/ses 0-200</code> (Ornek: <code>/ses 80</code>)",
+                    reply_to_message_id=msg_id,
+                )
+                return
+            new_v = await set_chat_volume(target_chat_id, int(arg_str))
+            await send_msg(http, chat_id, f"🔊 Ses seviyesi <code>%{new_v}</code> olarak ayarlandi.", reply_to_message_id=msg_id)
+            return
+
         if first_token in ("start", "studio", "baslat", "basla"):
             await send_msg(http, chat_id, WELCOME_TEXT, reply_markup=main_menu_markup(), reply_to_message_id=msg_id)
             return
 
         if first_token in ("hedefler", "gruplar", "aktar"):
-            txt = (
-                "🎯 <b>BAGLI GRUPLAR</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Aktif Hedef: <code>{target_chat_id}</code>\n"
-                "Yayini aktarmak istediginiz grubu secin:"
+            await _sync_assistant_dialogs()
+            target_chat_id = chat_id if chat.get("type") != "private" else get_user_target_chat(user_id, chat_id)
+            await send_msg(
+                http,
+                chat_id,
+                _build_targets_panel_text(target_chat_id),
+                reply_markup=target_groups_markup(user_id, target_chat_id),
+                reply_to_message_id=msg_id,
             )
-            await send_msg(http, chat_id, txt, reply_markup=target_groups_markup(user_id, target_chat_id), reply_to_message_id=msg_id)
             return
 
         if first_token == "kaydet":
@@ -954,6 +1071,7 @@ async def main() -> None:
 
     try:
         await init_player()
+        await _sync_assistant_dialogs()
         print("Asistan ve PyTgCalls baslatildi!", flush=True)
     except Exception as e:
         print(f"[ASISTAN UYARISI] {e}", flush=True)

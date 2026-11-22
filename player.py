@@ -103,7 +103,7 @@ async def play_or_queue(
     requested_by: str,
 ) -> tuple[str, dict]:
     """
-    Mevcut çağrılarla uyumluluk için tek parça/liste/link üzerinden oynatır veya sıraya alır.
+    Tek parça, liste veya bağlantı üzerinden yayın başlatır ya da listeye ekler.
     """
     mode = "video" if is_video else "audio"
     items = await resolve_input_items(query, mode=mode, requested_by=requested_by)

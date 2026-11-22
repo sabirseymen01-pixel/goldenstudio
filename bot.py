@@ -32,9 +32,8 @@ bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=False,
-    workdir=DOWNLOAD_DIR,
-    workers=1,
+    in_memory=True,
+    workers=4,
 )
 
 USER_MODE: dict[int, str] = {}
@@ -526,13 +525,13 @@ async def main():
     await bot.start()
     me = await bot.get_me()
     print(f"AKTIF BOT: @{me.username} (ID: {me.id})", flush=True)
-    # try:
-    #     await assistant.start()
-    #     await call_py.start()
-    #     print("Asistan ve PyTgCalls baslatildi!", flush=True)
-    # except Exception as e:
-    #     print(f"[ASISTAN UYARISI] {e}", flush=True)
-    print("IZOLE BOT TESTI AKTIF - player/assistant KAPALI", flush=True)
+    try:
+        await assistant.start()
+        await call_py.start()
+        print("Asistan ve PyTgCalls baslatildi!", flush=True)
+    except Exception as e:
+        print(f"[ASISTAN UYARISI] {e}", flush=True)
+    print("Golden Studio basariyla baslatildi!", flush=True)
     await asyncio.Event().wait()
 
 

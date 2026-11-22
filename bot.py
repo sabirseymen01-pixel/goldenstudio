@@ -19,6 +19,7 @@ from player import (
     set_chat_volume,
     NOW_PLAYING,
 )
+import player as _player_mod
 from playlist_manager import (
     LISTS,
     resolve_input_items,
@@ -403,20 +404,39 @@ async def maybe_await(val: Any) -> Any:
     return val
 
 
-async def _download_tg_file_to_disk(http: Any, file_id: str, suffix: str = "") -> str:
+async def _download_tg_file_to_disk(
+    http: Any,
+    file_id: str,
+    suffix: str = "",
+    msg: dict[str, Any] | None = None,
+) -> str:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     info = await tg_call(http, "getFile", {"file_id": file_id})
     file_path_tg = (info.get("result") or {}).get("file_path")
-    if not file_path_tg:
-        raise RuntimeError(f"Dosya yolu alinamadi: {info}")
-    ext = os.path.splitext(file_path_tg)[1] or suffix
-    local_path = os.path.join(DOWNLOAD_DIR, f"tg_{file_id[-12:]}{ext}")
-    dl_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path_tg}"
-    async with http.get(dl_url, timeout=120) as resp:
-        resp.raise_for_status()
-        with open(local_path, "wb") as out:
-            out.write(await resp.read())
-    return local_path
+
+    if file_path_tg:
+        ext = os.path.splitext(file_path_tg)[1] or suffix
+        local_path = os.path.join(DOWNLOAD_DIR, f"tg_{file_id[-12:]}{ext}")
+        dl_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path_tg}"
+        async with http.get(dl_url, timeout=180) as resp:
+            resp.raise_for_status()
+            with open(local_path, "wb") as out:
+                out.write(await resp.read())
+        return local_path
+
+    err_desc = str((info or {}).get("description") or "")
+    client = getattr(_player_mod, "assistant", None)
+    if "file is too big" in err_desc.lower() and client is not None and msg:
+        chat_id = (msg.get("chat") or {}).get("id")
+        message_id = msg.get("message_id")
+        if chat_id and message_id:
+            target_file = os.path.join(DOWNLOAD_DIR, f"tg_{file_id[-12:]}{suffix or '.mp4'}")
+            tg_msg = await client.get_messages(int(chat_id), int(message_id))
+            downloaded = await client.download_media(tg_msg, file_name=target_file)
+            if downloaded and os.path.exists(str(downloaded)):
+                return str(downloaded)
+
+    raise RuntimeError(f"Dosya yolu alinamadi: {info}")
 
 
 async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: str, is_video: bool) -> None:
@@ -565,7 +585,7 @@ async def _handle_media_message(
     try:
         if msg.get("photo"):
             best_photo = msg["photo"][-1]
-            local_path = await _download_tg_file_to_disk(http, best_photo["file_id"], ".jpg")
+            local_path = await _download_tg_file_to_disk(http, best_photo["file_id"], ".jpg", msg=msg)
             c_chat = collector_chat_id or reply_chat_id
 
             if user_id and (c_chat, user_id) in SLIDE_COLLECTORS and not force_presentation:
@@ -624,7 +644,7 @@ async def _handle_media_message(
             file_name = (media_obj.get("file_name") or "").lower()
             ext = os.path.splitext(file_name)[1]
             default_suffix = ext if ext in (AUDIO_EXTS | VIDEO_EXTS) else (".mp4" if is_vid else ".mp3")
-            local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], default_suffix)
+            local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], default_suffix, msg=msg)
             detected_title = extract_media_title(msg, media_obj=media_obj, local_path=local_path)
             final_title = clean_track_title(custom_title or detected_title, fallback="Parca")
 
@@ -967,7 +987,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 return
             kind = _detect_media_kind(src_msg) or "audio"
             ext = ".mp4" if kind == "video" else ".mp3"
-            local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], ext)
+            local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], ext, msg=src_msg)
             auto_title = extract_media_title(src_msg, media_obj=media_obj, local_path=local_path)
             title = clean_track_title(arg_str or auto_title, fallback="Kayitli Parca")
             rec = save_track_to_catalog(
@@ -1062,7 +1082,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             SLIDE_COLLECTORS[(chat_id, user_id)] = []
             if reply_msg.get("photo"):
                 try:
-                    local_path = await _download_tg_file_to_disk(http, reply_msg["photo"][-1]["file_id"], ".jpg")
+                    local_path = await _download_tg_file_to_disk(http, reply_msg["photo"][-1]["file_id"], ".jpg", msg=reply_msg)
                     SLIDE_COLLECTORS[(chat_id, user_id)].append(local_path)
                     await send_msg(
                         http,

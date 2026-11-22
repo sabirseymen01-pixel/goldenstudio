@@ -39,6 +39,21 @@ def get_chat_volume(chat_id: int) -> int:
     return int(_CHAT_VOLUME.get(chat_id, 100))
 
 
+async def _ensure_peer_resolved(chat_id: int) -> None:
+    if assistant is None:
+        return
+    cid = int(chat_id)
+    try:
+        await assistant.resolve_peer(cid)
+        return
+    except Exception:
+        pass
+    try:
+        await assistant.get_chat(cid)
+    except Exception as e:
+        print(f"[PEER UYARI] {cid} cozumlenemedi: {e}", flush=True)
+
+
 async def set_chat_volume(chat_id: int, volume_pct: int, restart_current: bool = True) -> int:
     vol = max(0, min(200, int(volume_pct)))
     _CHAT_VOLUME[chat_id] = vol
@@ -73,6 +88,7 @@ async def set_chat_volume(chat_id: int, volume_pct: int, restart_current: bool =
                         "is_video": is_video,
                     }
                     NOW_PLAYING[chat_id] = updated
+                    await _ensure_peer_resolved(chat_id)
                     stream = _build_stream(playable, is_video)
                     await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
                 except Exception as e:
@@ -151,6 +167,12 @@ async def init_player() -> None:
 
     await assistant.start()
     await call_py.start()
+
+    try:
+        async for _ in assistant.get_dialogs():
+            pass
+    except Exception as e:
+        print(f"[DIALOG ONBELLEK UYARI] {e}", flush=True)
 
     @call_py.on_update(filters.stream_end())
     async def _on_stream_end(_, update):
@@ -282,6 +304,7 @@ async def start_or_enqueue(
             }
             NOW_PLAYING[chat_id] = track
             try:
+                await _ensure_peer_resolved(chat_id)
                 stream = _build_stream(playable, is_video)
                 await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
             except Exception:
@@ -335,6 +358,7 @@ async def skip_track(chat_id: int) -> dict | None:
                     "is_video": is_video,
                 }
                 NOW_PLAYING[chat_id] = track
+                await _ensure_peer_resolved(chat_id)
                 stream = _build_stream(playable, is_video)
                 await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
                 return track
@@ -344,6 +368,7 @@ async def skip_track(chat_id: int) -> dict | None:
                 continue
 
         try:
+            await _ensure_peer_resolved(chat_id)
             await run_protected_call(
                 chat_id,
                 lambda: call_py.leave_call(chat_id),
@@ -364,6 +389,7 @@ async def stop_stream(chat_id: int):
         clear_list(chat_id)
         if call_py is not None:
             try:
+                await _ensure_peer_resolved(chat_id)
                 await run_protected_call(
                     chat_id,
                     lambda: call_py.leave_call(chat_id),
@@ -377,6 +403,7 @@ async def stop_stream(chat_id: int):
 async def pause_stream(chat_id: int):
     if call_py is None:
         raise RuntimeError("PyTgCalls aktif degil.")
+    await _ensure_peer_resolved(chat_id)
     if hasattr(call_py, "pause"):
         await call_py.pause(chat_id)
     else:
@@ -386,6 +413,7 @@ async def pause_stream(chat_id: int):
 async def resume_stream(chat_id: int):
     if call_py is None:
         raise RuntimeError("PyTgCalls aktif degil.")
+    await _ensure_peer_resolved(chat_id)
     if hasattr(call_py, "resume"):
         await call_py.resume(chat_id)
     else:

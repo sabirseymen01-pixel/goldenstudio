@@ -30,21 +30,44 @@ def _get_cookiefile_path() -> str | None:
     return COOKIES_FILE_PATH
 
 
-def _base_ydl_opts() -> dict:
+def _build_ydl_opts(use_cookies: bool = True) -> dict:
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv", "android", "web"],
+                "player_client": ["tv_embedded", "tv", "android", "web"],
             }
         },
     }
-    cookie_path = _get_cookiefile_path()
-    if cookie_path and os.path.exists(cookie_path):
-        opts["cookiefile"] = cookie_path
+    if use_cookies:
+        cookie_path = _get_cookiefile_path()
+        if cookie_path and os.path.exists(cookie_path):
+            opts["cookiefile"] = cookie_path
     return opts
+
+
+def _extract_with_cookie_fallback(search_query: str, extra_opts: dict, download: bool) -> dict:
+    last_err: Exception | None = None
+    for use_cookies in (True, False):
+        ydl_opts = {
+            **_build_ydl_opts(use_cookies=use_cookies),
+            **extra_opts,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(search_query, download=download)
+                if "entries" in info and info["entries"]:
+                    info = info["entries"][0]
+                return info
+        except Exception as exc:
+            last_err = exc
+            msg = str(exc)
+            if "The page needs to be reloaded" not in msg and "Sign in to confirm you’re not a bot" not in msg:
+                raise
+    assert last_err is not None
+    raise last_err
 
 
 def _clean_filename(name: str) -> str:
@@ -58,25 +81,21 @@ async def get_stream_info(query: str, video: bool = False) -> dict:
     loop = asyncio.get_running_loop()
     search_query = query if query.startswith(("http://", "https://")) else f"ytsearch1:{query}"
 
-    ydl_opts = {
-        **_base_ydl_opts(),
+    extra_opts = {
         "format": "best[height<=720][ext=mp4]/best[height<=720]/best" if video else "bestaudio/best",
         "extract_flat": False,
     }
 
     def _extract():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_query, download=False)
-            if "entries" in info:
-                info = info["entries"][0]
-            return {
-                "title": info.get("title", "Bilinmeyen Parça"),
-                "duration": info.get("duration", 0),
-                "webpage_url": info.get("webpage_url", query),
-                "stream_url": info.get("url"),
-                "thumbnail": info.get("thumbnail"),
-                "uploader": info.get("uploader", "Golden Studio"),
-            }
+        info = _extract_with_cookie_fallback(search_query, extra_opts, download=False)
+        return {
+            "title": info.get("title", "Bilinmeyen Parça"),
+            "duration": info.get("duration", 0),
+            "webpage_url": info.get("webpage_url", query),
+            "stream_url": info.get("url"),
+            "thumbnail": info.get("thumbnail"),
+            "uploader": info.get("uploader", "Golden Studio"),
+        }
 
     return await loop.run_in_executor(None, _extract)
 
@@ -124,8 +143,7 @@ async def download_media(query: str, mode: str = "mp3") -> dict:
     out_tmpl = os.path.join(DOWNLOAD_DIR, f"{uid}_%(title).60s.%(ext)s")
 
     if mode == "mp3":
-        ydl_opts = {
-            **_base_ydl_opts(),
+        extra_opts = {
             "format": "bestaudio/best",
             "outtmpl": out_tmpl,
             "postprocessors": [
@@ -137,18 +155,15 @@ async def download_media(query: str, mode: str = "mp3") -> dict:
             ],
         }
     else:
-        ydl_opts = {
-            **_base_ydl_opts(),
+        extra_opts = {
             "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
             "outtmpl": out_tmpl,
             "merge_output_format": "mp4",
         }
 
     def _download():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_query, download=True)
-            if "entries" in info:
-                info = info["entries"][0]
+        with yt_dlp.YoutubeDL({**_build_ydl_opts(use_cookies=True), **extra_opts}) as ydl:
+            info = _extract_with_cookie_fallback(search_query, extra_opts, download=True)
             raw_path = ydl.prepare_filename(info)
             if mode == "mp3":
                 file_path = os.path.splitext(raw_path)[0] + ".mp3"

@@ -2,6 +2,7 @@ import asyncio
 import os
 from aiohttp import web
 from pyrogram import Client, filters
+from pyrogram.handlers import RawUpdateHandler
 from pyrogram.types import (
     Message,
     CallbackQuery,
@@ -32,6 +33,7 @@ bot = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     in_memory=True,
+    workers=4,
 )
 
 USER_MODE: dict[int, str] = {}
@@ -49,6 +51,13 @@ ALL_COMMANDS = [
     "skip", "atla",
     "stop", "dur",
 ]
+
+
+async def _raw_update_logger(_, update, users, chats):
+    print(f"[RAW UPDATE] {type(update).__name__}", flush=True)
+
+
+bot.add_handler(RawUpdateHandler(_raw_update_logger), group=-10)
 
 
 def format_duration(seconds: int) -> str:
@@ -139,7 +148,10 @@ async def _debug_log(_, message: Message):
 
 @bot.on_message(filters.command(["start", "studio", "baslat"]))
 async def cmd_start(_, message: Message):
-    print(f"[BASLAT TETIKLENDI] User: {message.from_user.id if message.from_user else 'Yok'} | Chat: {message.chat.id}", flush=True)
+    print(
+        f"[BASLAT TETIKLENDI] User: {message.from_user.id if message.from_user else 'Yok'} | Chat: {message.chat.id}",
+        flush=True,
+    )
     await message.reply_text(
         WELCOME_TEXT,
         reply_markup=main_menu_keyboard(),
@@ -513,8 +525,12 @@ async def main():
     await bot.start()
     me = await bot.get_me()
     print(f"AKTIF BOT: @{me.username} (ID: {me.id})", flush=True)
-    await assistant.start()
-    await call_py.start()
+    try:
+        await assistant.start()
+        await call_py.start()
+        print("Asistan ve PyTgCalls baslatildi!", flush=True)
+    except Exception as e:
+        print(f"[ASISTAN UYARISI] {e}", flush=True)
     print("Golden Studio basariyla baslatildi!", flush=True)
     await asyncio.Event().wait()
 

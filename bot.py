@@ -6,7 +6,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 from config import BOT_TOKEN, PORT, DOWNLOAD_DIR
-from media_engine import download_media
+from media_engine import prepare_slideshow_presentation
 from player import (
     assistant,
     call_py,
@@ -27,6 +27,7 @@ from playlist_manager import (
 
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 USER_MODE: dict[int, str] = {}
+SLIDE_COLLECTORS: dict[tuple[int, int], list[str]] = {}
 
 # Tekrar / spam korumasi
 _ACTION_COOLDOWN_SEC = 2.0
@@ -57,10 +58,8 @@ ALL_COMMANDS = {
     "start", "studio", "baslat",
     "play", "oynat",
     "vplay", "video",
-    "sunum",
+    "sunum", "slayt",
     "liste", "sirala",
-    "mp3", "indir_mp3",
-    "mp4", "indir_mp4",
     "pause", "duraklat",
     "resume", "devam",
     "skip", "atla",
@@ -70,13 +69,13 @@ ALL_COMMANDS = {
 WELCOME_TEXT = (
     "✨ <b>GOLDEN STUDIO — VIP MEDYA & YAYIN MERKEZİ</b> ✨\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "Hoş geldiniz. <b>Golden Studio</b>, grubunuz ve özel sohbetleriniz için "
-    "stüdyo kalitesinde ses, HD video/görsel sunum yayını, liste yönetimi ve yüksek hızlı medya aktarımı sunar.\n\n"
+    "Hoş geldiniz. <b>Golden Studio</b>, grubunuz için doğrudan gönderilen ses/video dosyaları, "
+    "tek görsel <code>/sunum</code> ve çoklu görsel <code>/slayt</code> yayınlarıyla sesli sohbette çalışır.\n\n"
     "🎛️ <b>Neler Yapabilirsiniz?</b>\n"
-    "• <b>Sesli Sohbet Yayını:</b> Şarkı, video, YouTube linki/listesi veya sohbete atılan medya dosyalarını açar.\n"
-    "• <b>Resim Sunumu:</b> Gönderilen fotoğrafları sesli sohbette sunum videosuna çevirir.\n"
-    "• <b>Üstten Aşağı Liste:</b> <code>/liste</code> ve <code>/sirala</code> ile sırayı istediğiniz gibi düzenleyin.\n\n"
-    "👇 <i>Başlamak için aşağıdaki stüdyo butonlarından birini seçin veya doğrudan link/şarkı/dosya gönderin:</i>"
+    "• <b>Doğrudan Ses & Video:</b> Sohbete MP3/MP4 veya ses/video dosyası gönderin.\n"
+    "• <b>Resim Sunumu & Slayt:</b> Tek görsel için <code>/sunum</code>, birden fazla görsel için <code>/slayt</code> kullanın.\n"
+    "• <b>Üstten Aşağı Liste:</b> <code>/liste</code> ve <code>/sirala</code> ile sırayı düzenleyin.\n\n"
+    "👇 <i>Başlamak için aşağıdaki butonlardan birini seçin veya doğrudan dosya/fotoğraf gönderin:</i>"
 )
 
 
@@ -84,19 +83,18 @@ def main_menu_markup() -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "🎵 Sesli Sohbette Çal", "callback_data": "mode_audio"},
-                {"text": "🎬 Sesli Sohbette Video Aç", "callback_data": "mode_video"},
+                {"text": "🎵 Ses / Dosya Yayını", "callback_data": "mode_audio"},
+                {"text": "🎬 Video Yayını", "callback_data": "mode_video"},
             ],
             [
                 {"text": "🖼️ Resim Sunumu", "callback_data": "mode_image"},
+                {"text": "🎞️ Slayt Başlat", "callback_data": "mode_slide"},
+            ],
+            [
                 {"text": "📋 Liste & Sırala", "callback_data": "panel_list"},
-            ],
-            [
-                {"text": "🎧 MP3 İndir (320kbps)", "callback_data": "mode_mp3"},
-                {"text": "📹 MP4 İndir (720p)", "callback_data": "mode_mp4"},
-            ],
-            [
                 {"text": "🎛️ Canlı Kontrol Paneli", "callback_data": "panel_controls"},
+            ],
+            [
                 {"text": "📜 Komut Rehberi", "callback_data": "panel_help"},
             ],
         ]
@@ -122,10 +120,21 @@ def player_control_markup() -> dict[str, Any]:
 
 def format_duration(seconds: int) -> str:
     if not seconds:
-        return "Canlı / Sunum"
+        return "Sunum / Akış"
     mins, secs = divmod(int(seconds), 60)
     hours, mins = divmod(mins, 60)
     return f"{hours:02d}:{mins:02d}:{secs:02d}" if hours else f"{mins:02d}:{secs:02d}"
+
+
+def _kind_icon(item: dict[str, Any]) -> str:
+    kind = item.get("kind")
+    if kind == "slideshow":
+        return "🎞️"
+    if kind == "image":
+        return "🖼️"
+    if item.get("is_video") or kind == "video":
+        return "🎬"
+    return "🎵"
 
 
 def _build_list_text(chat_id: int) -> str:
@@ -136,14 +145,12 @@ def _build_list_text(chat_id: int) -> str:
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     if current:
-        ikon_now = "🖼️" if current.get("kind") == "image" else ("🎬" if current.get("is_video") else "🎵")
-        lines.append(f"▶️ <b>Şu An Yayında:</b> {ikon_now} <code>{current['title']}</code>")
+        lines.append(f"▶️ <b>Şu An Yayında:</b> {_kind_icon(current)} <code>{current['title']}</code>")
     if not lst:
         lines.append("Sırada bekleyen başka öğe yok.")
     else:
         for idx, item in enumerate(lst, 1):
-            ikon = "🖼️" if item.get("kind") == "image" else ("🎬" if item.get("is_video") else "🎵")
-            lines.append(f"<b>{idx}.</b> {ikon} <code>{item['title']}</code>")
+            lines.append(f"<b>{idx}.</b> {_kind_icon(item)} <code>{item['title']}</code>")
     lines.append("\n💡 <i>Sıra değiştirmek için:</i> <code>/sirala &lt;eski_no&gt; &lt;yeni_no&gt;</code> <i>(Örn:</i> <code>/sirala 3 1</code><i>)</i>")
     return "\n".join(lines)
 
@@ -209,10 +216,6 @@ async def answer_cb(http: Any, callback_query_id: str, text: str = "", show_aler
     )
 
 
-async def delete_msg(http: Any, chat_id: int | str, message_id: int) -> None:
-    await tg_call(http, "deleteMessage", {"chat_id": chat_id, "message_id": message_id})
-
-
 async def maybe_await(val: Any) -> Any:
     if inspect.isawaitable(val):
         return await val
@@ -229,7 +232,16 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
             http,
             chat_id,
             "⚠️ Sesli sohbet yayını yalnızca <b>gruplarda</b> başlatılabilir.\n"
-            "Özel sohbette kullanmak için <b>🎧 MP3 İndir</b> veya <b>📹 MP4 İndir</b> butonlarını seçebilirsiniz.",
+            "Lütfen grupta doğrudan ses/video dosyası gönderin veya <code>/sunum</code> ile görsel paylaşın.",
+            reply_to_message_id=msg_id,
+        )
+        return
+
+    if query_text.startswith(("http://", "https://")):
+        await send_msg(
+            http,
+            chat_id,
+            "ℹ️ Bağlantı üzerinden indirme/akış kapatıldı. Lütfen doğrudan <b>MP3/MP4 dosyası</b> gönderin veya <b>fotoğraf</b> paylaşın.",
             reply_to_message_id=msg_id,
         )
         return
@@ -243,31 +255,16 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
         return
 
     async with scope_lock:
-        wait_res = await send_msg(
-            http,
-            chat_id,
-            "⏳ <b>Golden Studio</b> akışı ve listeyi hazırlıyor, lütfen bekleyin...",
-            reply_to_message_id=msg_id,
-        )
-        wait_id = (wait_res.get("result") or {}).get("message_id")
         requester = (msg.get("from") or {}).get("first_name") or "Üye"
-
         try:
             status, track = await maybe_await(play_or_queue(chat_id, query_text, is_video, requester))
             dur = format_duration(track.get("duration", 0))
             kind = "🎬 HD Video Yayını" if is_video else "🎵 Stüdyo Ses Yayını"
-
             if status == "playing":
-                url = track.get("webpage_url") or query_text
-                title_html = (
-                    f'<a href="{url}">{track["title"]}</a>'
-                    if isinstance(url, str) and url.startswith(("http://", "https://"))
-                    else f"<code>{track['title']}</code>"
-                )
                 text = (
                     f"✨ <b>GOLDEN STUDIO — YAYINDA</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎶 <b>Parça:</b> {title_html}\n"
+                    f"🎶 <b>Parça:</b> <code>{track['title']}</code>\n"
                     f"⏱️ <b>Süre:</b> <code>{dur}</code>\n"
                     f"📡 <b>Format:</b> {kind}\n"
                     f"👤 <b>İsteyen:</b> {requester}"
@@ -279,89 +276,9 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
                     f"🎶 <b>Parça:</b> <code>{track['title']}</code> (<code>{dur}</code>)\n"
                     f"📡 <b>Format:</b> {kind}"
                 )
-
-            if wait_id:
-                await edit_msg(http, chat_id, wait_id, text, reply_markup=player_control_markup())
-            else:
-                await send_msg(http, chat_id, text, reply_markup=player_control_markup())
+            await send_msg(http, chat_id, text, reply_markup=player_control_markup(), reply_to_message_id=msg_id)
         except Exception as e:
-            err_text = f"❌ Yayın başlatılamadı:\n<code>{e}</code>"
-            if wait_id:
-                await edit_msg(http, chat_id, wait_id, err_text)
-            else:
-                await send_msg(http, chat_id, err_text)
-
-
-async def _process_download_request(http: Any, msg: dict[str, Any], query_text: str, mode: str) -> None:
-    chat_id = msg["chat"]["id"]
-    msg_id = msg["message_id"]
-    user_id = (msg.get("from") or {}).get("id")
-
-    if _is_duplicate_action(chat_id, user_id, f"dl:{mode}:{query_text.lower()}", cooldown=3.0):
-        return
-
-    scope_lock = _get_scope_lock(chat_id, f"dl:{mode}")
-    if scope_lock.locked():
-        await send_msg(http, chat_id, f"⏳ Zaten aktif bir <code>{mode.upper()}</code> indirme işlemi sürüyor...", reply_to_message_id=msg_id)
-        return
-
-    async with scope_lock:
-        wait_res = await send_msg(
-            http,
-            chat_id,
-            f"⏳ <b>Golden Studio</b> <code>{mode.upper()}</code> formatında hazırlıyor...",
-            reply_to_message_id=msg_id,
-        )
-        wait_id = (wait_res.get("result") or {}).get("message_id")
-        file_path = None
-
-        try:
-            result = await maybe_await(download_media(query_text, mode=mode))
-            file_path = result["file_path"]
-            if wait_id:
-                await edit_msg(http, chat_id, wait_id, "📤 Dosya sohbete yükleniyor...")
-
-            form = aiohttp.FormData()
-            form.add_field("chat_id", str(chat_id))
-            form.add_field("reply_to_message_id", str(msg_id))
-            form.add_field("parse_mode", "HTML")
-
-            if mode == "mp3":
-                form.add_field("title", str(result.get("title") or "Golden Studio"))
-                form.add_field("performer", str(result.get("performer") or "Golden Studio"))
-                form.add_field("duration", str(int(result.get("duration") or 0)))
-                form.add_field("caption", f"🎧 <b>{result['title']}</b>\n✨ <i>Golden Studio VIP Audio</i>")
-                with open(file_path, "rb") as f:
-                    form.add_field("audio", f, filename=os.path.basename(file_path))
-                    async with http.post(f"{API_BASE}/sendAudio", data=form, timeout=180) as r:
-                        data = await r.json()
-                        if not data.get("ok"):
-                            raise RuntimeError(str(data))
-            else:
-                form.add_field("duration", str(int(result.get("duration") or 0)))
-                form.add_field("supports_streaming", "true")
-                form.add_field("caption", f"🎬 <b>{result['title']}</b>\n✨ <i>Golden Studio VIP Video</i>")
-                with open(file_path, "rb") as f:
-                    form.add_field("video", f, filename=os.path.basename(file_path))
-                    async with http.post(f"{API_BASE}/sendVideo", data=form, timeout=180) as r:
-                        data = await r.json()
-                        if not data.get("ok"):
-                            raise RuntimeError(str(data))
-
-            if wait_id:
-                await delete_msg(http, chat_id, wait_id)
-        except Exception as e:
-            err_text = f"❌ İndirme sırasında hata oluştu:\n<code>{e}</code>"
-            if wait_id:
-                await edit_msg(http, chat_id, wait_id, err_text)
-            else:
-                await send_msg(http, chat_id, err_text)
-        finally:
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
+            await send_msg(http, chat_id, f"❌ Yayın başlatılamadı:\n<code>{e}</code>", reply_to_message_id=msg_id)
 
 
 async def _download_tg_file_to_disk(http: Any, file_id: str, suffix: str = "") -> str:
@@ -380,7 +297,49 @@ async def _download_tg_file_to_disk(http: Any, file_id: str, suffix: str = "") -
     return local_path
 
 
-async def _handle_media_message(http: Any, msg: dict[str, Any]) -> None:
+async def _finalize_slideshow(http: Any, chat_id: int, actor_id: int, requester: str, reply_to_id: int | None = None) -> None:
+    key = (chat_id, actor_id)
+    photos = SLIDE_COLLECTORS.pop(key, [])
+    if not photos:
+        await send_msg(http, chat_id, "⚠️ Slayt için toplanmış fotoğraf bulunamadı.", reply_to_message_id=reply_to_id)
+        return
+
+    wait_res = await send_msg(
+        http,
+        chat_id,
+        f"🎞️ <b>{len(photos)} görselden slayt videosu hazırlanıyor...</b>",
+        reply_to_message_id=reply_to_id,
+    )
+    wait_id = (wait_res.get("result") or {}).get("message_id")
+    try:
+        mp4_path = await prepare_slideshow_presentation(photos, seconds_per_slide=6)
+        item = {
+            "kind": "video",
+            "source": mp4_path,
+            "title": f"Slayt Sunumu ({len(photos)} Görsel)",
+            "duration": len(photos[:15]) * 6,
+            "is_video": True,
+            "requested_by": requester,
+        }
+        status, track = await maybe_await(start_or_enqueue(chat_id, [item]))
+        msg_txt = (
+            f"🎞️ <b>Slayt Yayında:</b> <code>{track['title']}</code>"
+            if status == "playing"
+            else f"📑 <b>Slayt Listeye Eklendi:</b> <code>{track['title']}</code>"
+        )
+        if wait_id:
+            await edit_msg(http, chat_id, wait_id, msg_txt, reply_markup=player_control_markup())
+        else:
+            await send_msg(http, chat_id, msg_txt, reply_markup=player_control_markup())
+    except Exception as e:
+        err_txt = f"❌ Slayt oluşturulamadı:\n<code>{e}</code>"
+        if wait_id:
+            await edit_msg(http, chat_id, wait_id, err_txt)
+        else:
+            await send_msg(http, chat_id, err_txt)
+
+
+async def _handle_media_message(http: Any, msg: dict[str, Any], force_presentation: bool = False) -> None:
     chat = msg["chat"]
     chat_id = chat["id"]
     msg_id = msg["message_id"]
@@ -393,11 +352,25 @@ async def _handle_media_message(http: Any, msg: dict[str, Any]) -> None:
         )
         return
 
-    requester = (msg.get("from") or {}).get("first_name") or "Üye"
+    user = msg.get("from") or {}
+    user_id = user.get("id")
+    requester = user.get("first_name") or "Üye"
 
     if msg.get("photo"):
         best_photo = msg["photo"][-1]
         local_path = await _download_tg_file_to_disk(http, best_photo["file_id"], ".jpg")
+
+        if user_id and (chat_id, user_id) in SLIDE_COLLECTORS and not force_presentation:
+            bucket = SLIDE_COLLECTORS[(chat_id, user_id)]
+            bucket.append(local_path)
+            await send_msg(
+                http,
+                chat_id,
+                f"🖼️ Slayta eklendi (<b>{len(bucket)}</b> görsel). Bitirmek için <code>/slayt bitir</code> yazın.",
+                reply_to_message_id=msg_id,
+            )
+            return
+
         items = await maybe_await(resolve_input_items(local_path, mode="image", requested_by=requester))
         status, track = await maybe_await(start_or_enqueue(chat_id, items))
         if status == "playing":
@@ -481,15 +454,12 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
         help_text = (
             "📜 <b>GOLDEN STUDIO — KOMUT REHBERİ</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🎵 <code>/oynat</code> veya <code>/play &lt;şarkı/link/liste&gt;</code> — Sesli sohbette çalar veya listeye ekler\n"
-            "🎬 <code>/video</code> veya <code>/vplay &lt;video/link&gt;</code> — Sesli sohbette video açar\n"
-            "🖼️ <code>/sunum</code> — Yanıtlanan fotoğrafı görsel sunum olarak açar\n"
+            "🎵 <b>Doğrudan Ses / Video:</b> Sohbete MP3/MP4 veya medya dosyası gönderin\n"
+            "🖼️ <code>/sunum</code> — Tek fotoğrafı 30 sn görsel sunum olarak açar\n"
+            "🎞️ <code>/slayt</code> &rarr; Fotoğrafları gönderin &rarr; <code>/slayt bitir</code> — Çoklu görsel slayt yayını\n"
             "📋 <code>/liste</code> — Üstten aşağı listeyi gösterir\n"
             "🔢 <code>/sirala &lt;eski_no&gt; &lt;yeni_no&gt;</code> — Sırayı değiştirir (Örn: <code>/sirala 3 1</code>)\n"
-            "🎧 <code>/indir_mp3</code> veya <code>/mp3 &lt;şarkı/link&gt;</code> — 320kbps MP3 gönderir\n"
-            "📹 <code>/indir_mp4</code> veya <code>/mp4 &lt;video/link&gt;</code> — 720p MP4 gönderir\n"
-            "⏸️ <code>/duraklat</code> • ▶️ <code>/devam</code> • ⏭️ <code>/atla</code> • ⏹️ <code>/dur</code>\n\n"
-            "💡 <i>İpucu:</i> Sohbete doğrudan ses, video veya fotoğraf atarak da oynatabilir ya da listeye ekleyebilirsiniz."
+            "⏸️ <code>/duraklat</code> • ▶️ <code>/devam</code> • ⏭️ <code>/atla</code> • ⏹️ <code>/dur</code>"
         )
         await edit_msg(
             http,
@@ -523,19 +493,22 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
 
     if data.startswith("mode_"):
         mode = data.split("_", 1)[1]
+        if user_id and mode == "slide":
+            SLIDE_COLLECTORS[(chat_id, user_id)] = []
+            await answer_cb(http, cq_id, "Slayt modu açıldı!")
+            await send_msg(http, chat_id, "🎞️ Slayt modu başladı. Fotoğrafları gönderin, bitince <code>/slayt bitir</code> yazın.")
+            return
         if user_id:
             USER_MODE[user_id] = mode
         labels = {
-            "audio": "🎵 <b>Sesli Sohbette Müzik Yayını</b>",
-            "video": "🎬 <b>Sesli Sohbette Video Yayını</b>",
+            "audio": "🎵 <b>Ses / Dosya Yayını</b>",
+            "video": "🎬 <b>Video Yayını</b>",
             "image": "🖼️ <b>Görsel Sunum Yayını</b>",
-            "mp3": "🎧 <b>320kbps MP3 İndirme</b>",
-            "mp4": "📹 <b>720p MP4 Video İndirme</b>",
         }
         hint = (
             "✍️ Şimdi bir <b>fotoğraf</b> gönderin:"
             if mode == "image"
-            else "✍️ Şimdi <b>şarkı adını</b>, <b>YouTube bağlantısını/listesini</b> veya <b>medya dosyasını</b> gönderin:"
+            else "✍️ Şimdi doğrudan <b>ses/video dosyasını</b> veya kayıtlı parça adını gönderin:"
         )
         await answer_cb(http, cq_id, "Mod seçildi!", show_alert=False)
         await send_msg(http, chat_id, f"✅ Aktif Mod: {labels.get(mode, mode)}\n{hint}")
@@ -586,20 +559,19 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
         if first_token in ("start", "studio", "baslat"):
             if _is_duplicate_action(chat_id, user_id, "cmd:start", cooldown=2.0):
                 return
-            print(f"[BASLAT TETIKLENDI] User: {user_id} | Chat: {chat_id}", flush=True)
             await send_msg(http, chat_id, WELCOME_TEXT, reply_markup=main_menu_markup(), reply_to_message_id=msg_id)
             return
 
         if first_token in ("play", "oynat"):
             if not arg_str:
-                await send_msg(http, chat_id, "Kullanım: <code>/oynat &lt;şarkı adı, YouTube linki veya oynatma listesi&gt;</code>", reply_to_message_id=msg_id)
+                await send_msg(http, chat_id, "Doğrudan MP3/MP4 dosyası gönderin veya <code>/oynat &lt;kayıtlı_parça&gt;</code> yazın.", reply_to_message_id=msg_id)
                 return
             await _process_stream_request(http, msg, arg_str, is_video=False)
             return
 
         if first_token in ("vplay", "video"):
             if not arg_str:
-                await send_msg(http, chat_id, "Kullanım: <code>/video &lt;video adı veya YouTube linki&gt;</code>", reply_to_message_id=msg_id)
+                await send_msg(http, chat_id, "Doğrudan MP4 dosyası gönderin veya <code>/video &lt;kayıtlı_video&gt;</code> yazın.", reply_to_message_id=msg_id)
                 return
             await _process_stream_request(http, msg, arg_str, is_video=True)
             return
@@ -609,7 +581,28 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             if not target.get("photo"):
                 await send_msg(http, chat_id, "Bir fotoğrafı yanıtlayıp <code>/sunum</code> yazın veya doğrudan fotoğraf gönderin.", reply_to_message_id=msg_id)
                 return
-            await _handle_media_message(http, target)
+            await _handle_media_message(http, target, force_presentation=True)
+            return
+
+        if first_token == "slayt":
+            if not user_id:
+                return
+            sub = arg_str.lower()
+            if sub in ("bitir", "tamam", "baslat", "oynat"):
+                requester = user.get("first_name") or "Üye"
+                await _finalize_slideshow(http, chat_id, user_id, requester, reply_to_id=msg_id)
+                return
+            if sub in ("iptal", "temizle"):
+                SLIDE_COLLECTORS.pop((chat_id, user_id), None)
+                await send_msg(http, chat_id, "🗑️ Slayt toplama listesi iptal edildi.", reply_to_message_id=msg_id)
+                return
+            SLIDE_COLLECTORS[(chat_id, user_id)] = []
+            await send_msg(
+                http,
+                chat_id,
+                "🎞️ Slayt modu açıldı. Görselleri sırayla gönderin, hazır olduğunda <code>/slayt bitir</code> yazın.",
+                reply_to_message_id=msg_id,
+            )
             return
 
         if first_token == "liste":
@@ -625,20 +618,6 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 return
             ok, info_msg = reorder_list(chat_id, int(parts[0]), int(parts[1]))
             await send_msg(http, chat_id, info_msg if ok else f"⚠️ {info_msg}", reply_to_message_id=msg_id)
-            return
-
-        if first_token in ("mp3", "indir_mp3"):
-            if not arg_str:
-                await send_msg(http, chat_id, "Kullanım: <code>/indir_mp3 &lt;şarkı adı veya link&gt;</code>", reply_to_message_id=msg_id)
-                return
-            await _process_download_request(http, msg, arg_str, mode="mp3")
-            return
-
-        if first_token in ("mp4", "indir_mp4"):
-            if not arg_str:
-                await send_msg(http, chat_id, "Kullanım: <code>/indir_mp4 &lt;video adı veya link&gt;</code>", reply_to_message_id=msg_id)
-                return
-            await _process_download_request(http, msg, arg_str, mode="mp4")
             return
 
         if first_token in ("pause", "duraklat"):
@@ -676,35 +655,14 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
         await _handle_media_message(http, msg)
         return
 
-    if text and user_id:
-        if user_id in USER_MODE:
-            mode = USER_MODE.pop(user_id)
-            if mode == "audio":
-                await _process_stream_request(http, msg, text, is_video=False)
-            elif mode == "video":
-                await _process_stream_request(http, msg, text, is_video=True)
-            elif mode == "image":
-                await send_msg(http, chat_id, "🖼️ Görsel sunum için lütfen bir fotoğraf gönderin veya fotoğrafa yanıt verip <code>/sunum</code> yazın.", reply_to_message_id=msg_id)
-            elif mode in ("mp3", "mp4"):
-                await _process_download_request(http, msg, text, mode=mode)
-            return
-
-        if chat.get("type") == "private" and text.startswith(("http://", "https://")):
-            USER_MODE[user_id] = "mp3"
-            await send_msg(
-                http,
-                chat_id,
-                "🔗 Link algılandı! Nasıl indirmek istersiniz?",
-                reply_markup={
-                    "inline_keyboard": [
-                        [
-                            {"text": "🎧 MP3 Olarak Gönder", "callback_data": "mode_mp3"},
-                            {"text": "📹 MP4 Olarak Gönder", "callback_data": "mode_mp4"},
-                        ]
-                    ]
-                },
-                reply_to_message_id=msg_id,
-            )
+    if text and user_id and user_id in USER_MODE:
+        mode = USER_MODE.pop(user_id)
+        if mode == "audio":
+            await _process_stream_request(http, msg, text, is_video=False)
+        elif mode == "video":
+            await _process_stream_request(http, msg, text, is_video=True)
+        elif mode == "image":
+            await send_msg(http, chat_id, "🖼️ Görsel sunum için lütfen bir fotoğraf gönderin veya fotoğrafa yanıt verip <code>/sunum</code> yazın.", reply_to_message_id=msg_id)
 
 
 async def polling_loop(http: Any) -> None:

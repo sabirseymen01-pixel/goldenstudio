@@ -1,6 +1,5 @@
 import asyncio
 import re
-from collections import deque
 import yt_dlp
 
 # chat_id -> list[dict] (üstten aşağı sıralı liste: index 0 en üst/sıradaki)
@@ -21,7 +20,7 @@ def _is_youtube_url(text: str) -> bool:
 async def resolve_input_items(query: str, mode: str, requested_by: str) -> list[dict]:
     """
     mode: 'audio' | 'video' | 'image'
-    Tek şarkı/link veya YouTube playlist linki için öğe listesi döndürür.
+    Tek şarkı/link, yerel dosya veya YouTube oynatma listesi için öğe listesi döndürür.
     """
     query = query.strip()
 
@@ -30,7 +29,7 @@ async def resolve_input_items(query: str, mode: str, requested_by: str) -> list[
             {
                 "kind": "image",
                 "title": f"Görsel Sunum ({requested_by})",
-                "source": query,  # yerel dosya yolu
+                "source": query,
                 "is_video": True,
                 "duration": 0,
                 "requested_by": requested_by,

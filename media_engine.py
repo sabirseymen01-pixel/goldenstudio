@@ -10,6 +10,21 @@ COOKIES_FILE_PATH = "/tmp/yt_cookies.txt"
 _COOKIE_LOGGED = False
 
 
+def _normalize_netscape_line(line: str) -> str:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return stripped
+    # Zaten TAB ayraci varsa dokunma
+    if "\t" in stripped:
+        return re.sub(r"[ \t]*\t[ \t]*", "\t", stripped)
+    # Boslukla ayrilmis 7 sutunlu Netscape satirini TAB'a cevir
+    # domain, flag, path, secure, expiration, name, value
+    parts = stripped.split(None, 6)
+    if len(parts) == 7:
+        return "\t".join(parts)
+    return stripped
+
+
 def _get_cookiefile_path() -> str | None:
     global _COOKIE_LOGGED
     raw_cookies = (os.getenv("YT_COOKIES") or "").strip()
@@ -19,13 +34,16 @@ def _get_cookiefile_path() -> str | None:
             _COOKIE_LOGGED = True
         return None
 
-    normalized = raw_cookies.replace("\r\n", "\n").replace("\\n", "\n").strip() + "\n"
+    unwrapped = raw_cookies.replace("\r\n", "\n").replace("\\n", "\n").strip()
+    fixed_lines = [_normalize_netscape_line(ln) for ln in unwrapped.splitlines() if ln.strip()]
+    normalized = "\n".join(fixed_lines) + "\n"
+
     with open(COOKIES_FILE_PATH, "w", encoding="utf-8") as f:
         f.write(normalized)
 
-    line_count = len([ln for ln in normalized.splitlines() if ln.strip() and not ln.startswith("#")])
+    valid_lines = len([ln for ln in fixed_lines if not ln.startswith("#") and "\t" in ln])
     if not _COOKIE_LOGGED:
-        print(f"[YT_COOKIES] Dosya yazildi ({COOKIES_FILE_PATH}), gecerli satir sayisi: {line_count}", flush=True)
+        print(f"[YT_COOKIES] Dosya yazildi ({COOKIES_FILE_PATH}), TAB'li gecerli satir sayisi: {valid_lines}", flush=True)
         _COOKIE_LOGGED = True
     return COOKIES_FILE_PATH
 

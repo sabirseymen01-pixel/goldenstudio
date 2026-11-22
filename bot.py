@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import os
+import time
 from typing import Any
 import aiohttp
 from aiohttp import web
@@ -13,6 +14,8 @@ from player import (
     start_or_enqueue,
     skip_track,
     stop_stream,
+    pause_stream,
+    resume_stream,
     NOW_PLAYING,
 )
 from playlist_manager import (
@@ -24,6 +27,31 @@ from playlist_manager import (
 
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 USER_MODE: dict[int, str] = {}
+
+# Tekrar / spam korumasi
+_ACTION_COOLDOWN_SEC = 2.0
+_LAST_ACTION_TS: dict[tuple[int, int | str, str], float] = {}
+_ACTIVE_ACTION_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+
+
+def _is_duplicate_action(chat_id: int, actor_id: int | str | None, scope: str, cooldown: float = _ACTION_COOLDOWN_SEC) -> bool:
+    key = (chat_id, actor_id if actor_id is not None else "anon", scope)
+    now = time.monotonic()
+    prev = _LAST_ACTION_TS.get(key, 0.0)
+    if (now - prev) < cooldown:
+        return True
+    _LAST_ACTION_TS[key] = now
+    return False
+
+
+def _get_scope_lock(chat_id: int, scope: str) -> asyncio.Lock:
+    key = (chat_id, scope)
+    lock = _ACTIVE_ACTION_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ACTIVE_ACTION_LOCKS[key] = lock
+    return lock
+
 
 ALL_COMMANDS = {
     "start", "studio", "baslat",
@@ -195,6 +223,7 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
     chat = msg["chat"]
     chat_id = chat["id"]
     msg_id = msg["message_id"]
+    user_id = (msg.get("from") or {}).get("id")
     if chat.get("type") == "private":
         await send_msg(
             http,
@@ -205,114 +234,134 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
         )
         return
 
-    wait_res = await send_msg(
-        http,
-        chat_id,
-        "⏳ <b>Golden Studio</b> akışı ve listeyi hazırlıyor, lütfen bekleyin...",
-        reply_to_message_id=msg_id,
-    )
-    wait_id = (wait_res.get("result") or {}).get("message_id")
-    requester = (msg.get("from") or {}).get("first_name") or "Üye"
+    if _is_duplicate_action(chat_id, user_id, f"stream:{query_text.lower()}", cooldown=3.0):
+        return
 
-    try:
-        status, track = await maybe_await(play_or_queue(chat_id, query_text, is_video, requester))
-        dur = format_duration(track.get("duration", 0))
-        kind = "🎬 HD Video Yayını" if is_video else "🎵 Stüdyo Ses Yayını"
+    scope_lock = _get_scope_lock(chat_id, "stream")
+    if scope_lock.locked():
+        await send_msg(http, chat_id, "⏳ Mevcut yayın isteği işleniyor, lütfen kısa bir süre bekleyin...", reply_to_message_id=msg_id)
+        return
 
-        if status == "playing":
-            url = track.get("webpage_url") or query_text
-            title_html = (
-                f'<a href="{url}">{track["title"]}</a>'
-                if isinstance(url, str) and url.startswith(("http://", "https://"))
-                else f"<code>{track['title']}</code>"
-            )
-            text = (
-                f"✨ <b>GOLDEN STUDIO — YAYINDA</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎶 <b>Parça:</b> {title_html}\n"
-                f"⏱️ <b>Süre:</b> <code>{dur}</code>\n"
-                f"📡 <b>Format:</b> {kind}\n"
-                f"👤 <b>İsteyen:</b> {requester}"
-            )
-        else:
-            q_pos = track.get("queue_position") or len(LISTS.get(chat_id, []))
-            text = (
-                f"📑 <b>Listeye Eklendi (#{q_pos})</b>\n"
-                f"🎶 <b>Parça:</b> <code>{track['title']}</code> (<code>{dur}</code>)\n"
-                f"📡 <b>Format:</b> {kind}"
-            )
+    async with scope_lock:
+        wait_res = await send_msg(
+            http,
+            chat_id,
+            "⏳ <b>Golden Studio</b> akışı ve listeyi hazırlıyor, lütfen bekleyin...",
+            reply_to_message_id=msg_id,
+        )
+        wait_id = (wait_res.get("result") or {}).get("message_id")
+        requester = (msg.get("from") or {}).get("first_name") or "Üye"
 
-        if wait_id:
-            await edit_msg(http, chat_id, wait_id, text, reply_markup=player_control_markup())
-        else:
-            await send_msg(http, chat_id, text, reply_markup=player_control_markup())
-    except Exception as e:
-        err_text = f"❌ Yayın başlatılamadı:\n<code>{e}</code>"
-        if wait_id:
-            await edit_msg(http, chat_id, wait_id, err_text)
-        else:
-            await send_msg(http, chat_id, err_text)
+        try:
+            status, track = await maybe_await(play_or_queue(chat_id, query_text, is_video, requester))
+            dur = format_duration(track.get("duration", 0))
+            kind = "🎬 HD Video Yayını" if is_video else "🎵 Stüdyo Ses Yayını"
+
+            if status == "playing":
+                url = track.get("webpage_url") or query_text
+                title_html = (
+                    f'<a href="{url}">{track["title"]}</a>'
+                    if isinstance(url, str) and url.startswith(("http://", "https://"))
+                    else f"<code>{track['title']}</code>"
+                )
+                text = (
+                    f"✨ <b>GOLDEN STUDIO — YAYINDA</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎶 <b>Parça:</b> {title_html}\n"
+                    f"⏱️ <b>Süre:</b> <code>{dur}</code>\n"
+                    f"📡 <b>Format:</b> {kind}\n"
+                    f"👤 <b>İsteyen:</b> {requester}"
+                )
+            else:
+                q_pos = track.get("queue_position") or len(LISTS.get(chat_id, []))
+                text = (
+                    f"📑 <b>Listeye Eklendi (#{q_pos})</b>\n"
+                    f"🎶 <b>Parça:</b> <code>{track['title']}</code> (<code>{dur}</code>)\n"
+                    f"📡 <b>Format:</b> {kind}"
+                )
+
+            if wait_id:
+                await edit_msg(http, chat_id, wait_id, text, reply_markup=player_control_markup())
+            else:
+                await send_msg(http, chat_id, text, reply_markup=player_control_markup())
+        except Exception as e:
+            err_text = f"❌ Yayın başlatılamadı:\n<code>{e}</code>"
+            if wait_id:
+                await edit_msg(http, chat_id, wait_id, err_text)
+            else:
+                await send_msg(http, chat_id, err_text)
 
 
 async def _process_download_request(http: Any, msg: dict[str, Any], query_text: str, mode: str) -> None:
     chat_id = msg["chat"]["id"]
     msg_id = msg["message_id"]
-    wait_res = await send_msg(
-        http,
-        chat_id,
-        f"⏳ <b>Golden Studio</b> <code>{mode.upper()}</code> formatında hazırlıyor...",
-        reply_to_message_id=msg_id,
-    )
-    wait_id = (wait_res.get("result") or {}).get("message_id")
-    file_path = None
+    user_id = (msg.get("from") or {}).get("id")
 
-    try:
-        result = await maybe_await(download_media(query_text, mode=mode))
-        file_path = result["file_path"]
-        if wait_id:
-            await edit_msg(http, chat_id, wait_id, "📤 Dosya sohbete yükleniyor...")
+    if _is_duplicate_action(chat_id, user_id, f"dl:{mode}:{query_text.lower()}", cooldown=3.0):
+        return
 
-        form = aiohttp.FormData()
-        form.add_field("chat_id", str(chat_id))
-        form.add_field("reply_to_message_id", str(msg_id))
-        form.add_field("parse_mode", "HTML")
+    scope_lock = _get_scope_lock(chat_id, f"dl:{mode}")
+    if scope_lock.locked():
+        await send_msg(http, chat_id, f"⏳ Zaten aktif bir <code>{mode.upper()}</code> indirme işlemi sürüyor...", reply_to_message_id=msg_id)
+        return
 
-        if mode == "mp3":
-            form.add_field("title", str(result.get("title") or "Golden Studio"))
-            form.add_field("performer", str(result.get("performer") or "Golden Studio"))
-            form.add_field("duration", str(int(result.get("duration") or 0)))
-            form.add_field("caption", f"🎧 <b>{result['title']}</b>\n✨ <i>Golden Studio VIP Audio</i>")
-            with open(file_path, "rb") as f:
-                form.add_field("audio", f, filename=os.path.basename(file_path))
-                async with http.post(f"{API_BASE}/sendAudio", data=form, timeout=180) as r:
-                    data = await r.json()
-                    if not data.get("ok"):
-                        raise RuntimeError(str(data))
-        else:
-            form.add_field("duration", str(int(result.get("duration") or 0)))
-            form.add_field("supports_streaming", "true")
-            form.add_field("caption", f"🎬 <b>{result['title']}</b>\n✨ <i>Golden Studio VIP Video</i>")
-            with open(file_path, "rb") as f:
-                form.add_field("video", f, filename=os.path.basename(file_path))
-                async with http.post(f"{API_BASE}/sendVideo", data=form, timeout=180) as r:
-                    data = await r.json()
-                    if not data.get("ok"):
-                        raise RuntimeError(str(data))
+    async with scope_lock:
+        wait_res = await send_msg(
+            http,
+            chat_id,
+            f"⏳ <b>Golden Studio</b> <code>{mode.upper()}</code> formatında hazırlıyor...",
+            reply_to_message_id=msg_id,
+        )
+        wait_id = (wait_res.get("result") or {}).get("message_id")
+        file_path = None
 
-        if wait_id:
-            await delete_msg(http, chat_id, wait_id)
-    except Exception as e:
-        err_text = f"❌ İndirme sırasında hata oluştu:\n<code>{e}</code>"
-        if wait_id:
-            await edit_msg(http, chat_id, wait_id, err_text)
-        else:
-            await send_msg(http, chat_id, err_text)
-    finally:
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
+        try:
+            result = await maybe_await(download_media(query_text, mode=mode))
+            file_path = result["file_path"]
+            if wait_id:
+                await edit_msg(http, chat_id, wait_id, "📤 Dosya sohbete yükleniyor...")
+
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            form.add_field("reply_to_message_id", str(msg_id))
+            form.add_field("parse_mode", "HTML")
+
+            if mode == "mp3":
+                form.add_field("title", str(result.get("title") or "Golden Studio"))
+                form.add_field("performer", str(result.get("performer") or "Golden Studio"))
+                form.add_field("duration", str(int(result.get("duration") or 0)))
+                form.add_field("caption", f"🎧 <b>{result['title']}</b>\n✨ <i>Golden Studio VIP Audio</i>")
+                with open(file_path, "rb") as f:
+                    form.add_field("audio", f, filename=os.path.basename(file_path))
+                    async with http.post(f"{API_BASE}/sendAudio", data=form, timeout=180) as r:
+                        data = await r.json()
+                        if not data.get("ok"):
+                            raise RuntimeError(str(data))
+            else:
+                form.add_field("duration", str(int(result.get("duration") or 0)))
+                form.add_field("supports_streaming", "true")
+                form.add_field("caption", f"🎬 <b>{result['title']}</b>\n✨ <i>Golden Studio VIP Video</i>")
+                with open(file_path, "rb") as f:
+                    form.add_field("video", f, filename=os.path.basename(file_path))
+                    async with http.post(f"{API_BASE}/sendVideo", data=form, timeout=180) as r:
+                        data = await r.json()
+                        if not data.get("ok"):
+                            raise RuntimeError(str(data))
+
+            if wait_id:
+                await delete_msg(http, chat_id, wait_id)
+        except Exception as e:
+            err_text = f"❌ İndirme sırasında hata oluştu:\n<code>{e}</code>"
+            if wait_id:
+                await edit_msg(http, chat_id, wait_id, err_text)
+            else:
+                await send_msg(http, chat_id, err_text)
+        finally:
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
 
 
 async def _download_tg_file_to_disk(http: Any, file_id: str, suffix: str = "") -> str:
@@ -399,6 +448,10 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
 
     if not chat_id or not msg_id:
         await answer_cb(http, cq_id)
+        return
+
+    if _is_duplicate_action(chat_id, user_id, f"cb:{data}", cooldown=1.5):
+        await answer_cb(http, cq_id, "⏳ Lütfen biraz bekleyin...")
         return
 
     if data == "panel_home":
@@ -490,13 +543,13 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
 
     if data == "ctrl_pause":
         try:
-            await maybe_await(call_py.pause_stream(chat_id))
+            await maybe_await(pause_stream(chat_id))
             await answer_cb(http, cq_id, "⏸️ Yayın duraklatıldı.")
         except Exception as e:
             await answer_cb(http, cq_id, f"Hata: {e}", show_alert=True)
     elif data == "ctrl_resume":
         try:
-            await maybe_await(call_py.resume_stream(chat_id))
+            await maybe_await(resume_stream(chat_id))
             await answer_cb(http, cq_id, "▶️ Yayın devam ediyor.")
         except Exception as e:
             await answer_cb(http, cq_id, f"Hata: {e}", show_alert=True)
@@ -531,6 +584,8 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
         arg_str = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
 
         if first_token in ("start", "studio", "baslat"):
+            if _is_duplicate_action(chat_id, user_id, "cmd:start", cooldown=2.0):
+                return
             print(f"[BASLAT TETIKLENDI] User: {user_id} | Chat: {chat_id}", flush=True)
             await send_msg(http, chat_id, WELCOME_TEXT, reply_markup=main_menu_markup(), reply_to_message_id=msg_id)
             return
@@ -558,6 +613,8 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             return
 
         if first_token == "liste":
+            if _is_duplicate_action(chat_id, user_id, "cmd:liste", cooldown=2.0):
+                return
             await send_msg(http, chat_id, _build_list_text(chat_id), reply_markup=player_control_markup(), reply_to_message_id=msg_id)
             return
 
@@ -585,16 +642,22 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             return
 
         if first_token in ("pause", "duraklat"):
-            await maybe_await(call_py.pause_stream(chat_id))
+            if _is_duplicate_action(chat_id, user_id, "cmd:pause", cooldown=2.0):
+                return
+            await maybe_await(pause_stream(chat_id))
             await send_msg(http, chat_id, "⏸️ Yayın duraklatıldı.", reply_to_message_id=msg_id)
             return
 
         if first_token in ("resume", "devam"):
-            await maybe_await(call_py.resume_stream(chat_id))
+            if _is_duplicate_action(chat_id, user_id, "cmd:resume", cooldown=2.0):
+                return
+            await maybe_await(resume_stream(chat_id))
             await send_msg(http, chat_id, "▶️ Yayın devam ediyor.", reply_to_message_id=msg_id)
             return
 
         if first_token in ("skip", "atla"):
+            if _is_duplicate_action(chat_id, user_id, "cmd:skip", cooldown=2.5):
+                return
             nxt = await maybe_await(skip_track(chat_id))
             if nxt:
                 await send_msg(http, chat_id, f"⏭️ Sıradaki öğeye geçildi: <b>{nxt['title']}</b>", reply_to_message_id=msg_id)
@@ -603,6 +666,8 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             return
 
         if first_token in ("stop", "dur"):
+            if _is_duplicate_action(chat_id, user_id, "cmd:stop", cooldown=2.5):
+                return
             await maybe_await(stop_stream(chat_id))
             await send_msg(http, chat_id, "⏹️ <b>Golden Studio</b> yayını durduruldu ve liste temizlendi.", reply_to_message_id=msg_id)
             return
@@ -649,6 +714,7 @@ async def polling_loop(http: Any) -> None:
     print(f"AKTIF BOT (BOT API): @{me.get('username')} (ID: {me.get('id')})", flush=True)
 
     offset: int | None = None
+    conflict_streak = 0
     while True:
         try:
             params: dict[str, Any] = {"timeout": 25, "allowed_updates": ["message", "callback_query"]}
@@ -658,10 +724,19 @@ async def polling_loop(http: Any) -> None:
             async with http.get(url, params=params, timeout=35) as resp:
                 data = await resp.json()
             if not data.get("ok"):
+                err_code = data.get("error_code")
+                desc = str(data.get("description") or "")
                 print(f"[GETUPDATES HATA] {data}", flush=True)
-                await asyncio.sleep(3)
+                if err_code == 409 or "conflict" in desc.lower():
+                    conflict_streak += 1
+                    wait_sec = min(45.0, 6.0 * (2 ** min(conflict_streak - 1, 3)))
+                    await asyncio.sleep(wait_sec)
+                else:
+                    conflict_streak = 0
+                    await asyncio.sleep(3)
                 continue
 
+            conflict_streak = 0
             for upd in data.get("result", []):
                 upd_id = upd.get("update_id")
                 if upd_id is not None:
@@ -674,7 +749,7 @@ async def polling_loop(http: Any) -> None:
             break
         except Exception as e:
             print(f"[POLLING HATA] {e}", flush=True)
-            await asyncio.sleep(3)
+            await asyncio.sleep(4)
 
 
 async def start_web_server() -> None:

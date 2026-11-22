@@ -18,6 +18,7 @@ assistant = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
+    in_memory=True,
 )
 
 call_py = PyTgCalls(assistant)
@@ -82,7 +83,11 @@ async def start_or_enqueue(
             "is_video": is_video,
         }
         NOW_PLAYING[chat_id] = track
-        await call_py.play(chat_id, _build_stream(playable, is_video))
+        try:
+            await call_py.play(chat_id, _build_stream(playable, is_video))
+        except Exception:
+            NOW_PLAYING.pop(chat_id, None)
+            raise
         return "playing", track
 
     total = add_to_list(chat_id, items, top=False)
@@ -117,7 +122,11 @@ async def skip_track(chat_id: int) -> dict | None:
             "is_video": is_video,
         }
         NOW_PLAYING[chat_id] = track
-        await call_py.play(chat_id, _build_stream(playable, is_video))
+        try:
+            await call_py.play(chat_id, _build_stream(playable, is_video))
+        except Exception:
+            NOW_PLAYING.pop(chat_id, None)
+            raise
         return track
 
     NOW_PLAYING.pop(chat_id, None)

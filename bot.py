@@ -139,6 +139,7 @@ async def _debug_log(_, message: Message):
 
 @bot.on_message(filters.command(["start", "studio", "baslat"]))
 async def cmd_start(_, message: Message):
+    print(f"[BASLAT TETIKLENDI] User: {message.from_user.id if message.from_user else 'Yok'} | Chat: {message.chat.id}", flush=True)
     await message.reply_text(
         WELCOME_TEXT,
         reply_markup=main_menu_keyboard(),

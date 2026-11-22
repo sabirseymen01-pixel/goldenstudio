@@ -3,127 +3,20 @@ import os
 import re
 import subprocess
 import uuid
-import yt_dlp
 from config import DOWNLOAD_DIR
-
-COOKIES_FILE_PATH = "/tmp/yt_cookies.txt"
-_COOKIE_LOGGED = False
-
-
-def _normalize_netscape_line(line: str) -> str:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#"):
-        return stripped
-    # Zaten TAB ayraci varsa dokunma
-    if "\t" in stripped:
-        return re.sub(r"[ \t]*\t[ \t]*", "\t", stripped)
-    # Boslukla ayrilmis 7 sutunlu Netscape satirini TAB'a cevir
-    # domain, flag, path, secure, expiration, name, value
-    parts = stripped.split(None, 6)
-    if len(parts) == 7:
-        return "\t".join(parts)
-    return stripped
-
-
-def _get_cookiefile_path() -> str | None:
-    global _COOKIE_LOGGED
-    raw_cookies = (os.getenv("YT_COOKIES") or "").strip()
-    if not raw_cookies:
-        if not _COOKIE_LOGGED:
-            print("[YT_COOKIES] Ortam degiskeni bos veya tanimli degil.", flush=True)
-            _COOKIE_LOGGED = True
-        return None
-
-    unwrapped = raw_cookies.replace("\r\n", "\n").replace("\\n", "\n").strip()
-    fixed_lines = [_normalize_netscape_line(ln) for ln in unwrapped.splitlines() if ln.strip()]
-    normalized = "\n".join(fixed_lines) + "\n"
-
-    with open(COOKIES_FILE_PATH, "w", encoding="utf-8") as f:
-        f.write(normalized)
-
-    valid_lines = len([ln for ln in fixed_lines if not ln.startswith("#") and "\t" in ln])
-    if not _COOKIE_LOGGED:
-        print(f"[YT_COOKIES] Dosya yazildi ({COOKIES_FILE_PATH}), TAB'li gecerli satir sayisi: {valid_lines}", flush=True)
-        _COOKIE_LOGGED = True
-    return COOKIES_FILE_PATH
-
-
-def _build_ydl_opts(use_cookies: bool = True) -> dict:
-    opts: dict = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["mweb", "ios", "tv_embedded", "web"],
-            }
-        },
-    }
-    if use_cookies:
-        cookie_path = _get_cookiefile_path()
-        if cookie_path and os.path.exists(cookie_path):
-            opts["cookiefile"] = cookie_path
-    return opts
-
-
-def _extract_with_cookie_fallback(search_query: str, extra_opts: dict, download: bool) -> tuple[dict, dict]:
-    last_err: Exception | None = None
-    for use_cookies in (True, False):
-        ydl_opts = {
-            **_build_ydl_opts(use_cookies=use_cookies),
-            **extra_opts,
-        }
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(search_query, download=download)
-                if "entries" in info and info["entries"]:
-                    info = info["entries"][0]
-                return info, ydl_opts
-        except Exception as exc:
-            last_err = exc
-            msg = str(exc)
-            if "The page needs to be reloaded" not in msg and "Sign in to confirm you’re not a bot" not in msg:
-                raise
-    assert last_err is not None
-    raise last_err
 
 
 def _clean_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", name)[:80].strip()
 
 
-async def get_stream_info(query: str, video: bool = False) -> dict:
+async def prepare_image_presentation(image_path: str, duration_sec: int = 30) -> str:
     """
-    Şarkı adı veya linkten ses/video stream bilgilerini ve doğrudan akış URL'sini çeker.
-    """
-    loop = asyncio.get_running_loop()
-    search_query = query if query.startswith(("http://", "https://")) else f"ytsearch1:{query}"
-
-    extra_opts = {
-        "format": "best[height<=720][ext=mp4]/best[height<=720]/best" if video else "bestaudio/best",
-        "extract_flat": False,
-    }
-
-    def _extract():
-        info, _ = _extract_with_cookie_fallback(search_query, extra_opts, download=False)
-        return {
-            "title": info.get("title", "Bilinmeyen Parça"),
-            "duration": info.get("duration", 0),
-            "webpage_url": info.get("webpage_url", query),
-            "stream_url": info.get("url"),
-            "thumbnail": info.get("thumbnail"),
-            "uploader": info.get("uploader", "Golden Studio"),
-        }
-
-    return await loop.run_in_executor(None, _extract)
-
-
-async def prepare_image_presentation(image_path: str) -> str:
-    """
-    Görseli sesli sohbette kesintisiz video yayını olarak açmak için döngülü MP4 sunuma çevirir.
+    Tek görseli sesli sohbette belirtilen saniye boyunca 720p MP4 sunuma çevirir.
     """
     loop = asyncio.get_running_loop()
     out_path = os.path.splitext(image_path)[0] + "_sunum.mp4"
+    safe_duration = max(5, min(int(duration_sec), 120))
 
     cmd = [
         "ffmpeg",
@@ -134,10 +27,12 @@ async def prepare_image_presentation(image_path: str) -> str:
         "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
         "-c:v", "libx264",
         "-tune", "stillimage",
+        "-preset", "veryfast",
         "-c:a", "aac",
         "-b:a", "128k",
         "-pix_fmt", "yuv420p",
         "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        "-t", str(safe_duration),
         "-shortest",
         "-movflags", "+faststart",
         out_path,
@@ -150,50 +45,57 @@ async def prepare_image_presentation(image_path: str) -> str:
     return await loop.run_in_executor(None, _run)
 
 
-async def download_media(query: str, mode: str = "mp3") -> dict:
+async def prepare_slideshow_presentation(image_paths: list[str], seconds_per_slide: int = 6) -> str:
     """
-    mode: 'mp3' veya 'mp4'
-    Dosyayı indirir ve yolunu + başlığını döndürür.
+    Birden fazla görseli sırayla birleştirerek 720p MP4 slayt yayını üretir.
+    Render Free bellek/CPU sınırını korumak için en fazla 15 görsel işler.
     """
+    if not image_paths:
+        raise ValueError("Slayt oluşturmak için en az bir görsel gerekli.")
+
+    if len(image_paths) == 1:
+        return await prepare_image_presentation(image_paths[0], duration_sec=max(10, seconds_per_slide * 3))
+
     loop = asyncio.get_running_loop()
-    search_query = query if query.startswith(("http://", "https://")) else f"ytsearch1:{query}"
     uid = uuid.uuid4().hex[:8]
-    out_tmpl = os.path.join(DOWNLOAD_DIR, f"{uid}_%(title).60s.%(ext)s")
+    list_file = os.path.join(DOWNLOAD_DIR, f"slides_{uid}.txt")
+    out_path = os.path.join(DOWNLOAD_DIR, f"slayt_{uid}.mp4")
+    per_slide = max(2, min(int(seconds_per_slide), 20))
+    selected_images = image_paths[:15]
 
-    if mode == "mp3":
-        extra_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": out_tmpl,
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "320",
-                }
-            ],
-        }
-    else:
-        extra_opts = {
-            "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
-            "outtmpl": out_tmpl,
-            "merge_output_format": "mp4",
-        }
+    def _run():
+        with open(list_file, "w", encoding="utf-8") as f:
+            for img in selected_images:
+                safe_img = img.replace("'", "'\\''")
+                f.write(f"file '{safe_img}'\n")
+                f.write(f"duration {per_slide}\n")
+            # concat demuxer kuralı: son görsel tekrar yazılır
+            last_img = selected_images[-1].replace("'", "'\\''")
+            f.write(f"file '{last_img}'\n")
 
-    def _download():
-        info, used_opts = _extract_with_cookie_fallback(search_query, extra_opts, download=True)
-        with yt_dlp.YoutubeDL(used_opts) as ydl:
-            raw_path = ydl.prepare_filename(info)
-        if mode == "mp3":
-            file_path = os.path.splitext(raw_path)[0] + ".mp3"
-        else:
-            file_path = os.path.splitext(raw_path)[0] + ".mp4"
-            if not os.path.exists(file_path) and os.path.exists(raw_path):
-                file_path = raw_path
-        return {
-            "file_path": file_path,
-            "title": _clean_filename(info.get("title", "Golden_Studio_Media")),
-            "duration": int(info.get("duration") or 0),
-            "performer": info.get("uploader", "Golden Studio"),
-        }
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_file,
+            "-f", "lavfi",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-pix_fmt", "yuv420p",
+            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-shortest",
+            "-movflags", "+faststart",
+            out_path,
+        ]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        finally:
+            if os.path.exists(list_file):
+                os.remove(list_file)
+        return out_path
 
-    return await loop.run_in_executor(None, _download)
+    return await loop.run_in_executor(None, _run)

@@ -33,7 +33,6 @@ bot = Client(
     bot_token=BOT_TOKEN,
 )
 
-# Kullanıcının butonla seçtiği aktif mod: user_id -> "audio" | "video" | "mp3" | "mp4" | "image"
 USER_MODE: dict[int, str] = {}
 
 ALL_COMMANDS = [
@@ -374,8 +373,6 @@ async def _handle_media_message(message: Message):
             )
 
 
-# --- KOMUTLAR (TÜRKÇE & İNGİLİZCE) ---
-
 @bot.on_message(filters.command(["play", "oynat"]))
 async def cmd_play(_, message: Message):
     if len(message.command) < 2:
@@ -455,14 +452,10 @@ async def cmd_stop(_, message: Message):
     await message.reply_text("⏹️ **Golden Studio** yayını durduruldu ve liste temizlendi.")
 
 
-# --- DOĞRUDAN ATILAN FOTOĞRAF / VİDEO / SES DOSYALARI ---
-
 @bot.on_message(filters.photo | filters.video | filters.audio | filters.voice)
 async def on_uploaded_media(_, message: Message):
     await _handle_media_message(message)
 
-
-# --- BUTONLA MOD SEÇİLDİKTEN SONRA GELEN MESAJLARI YAKALAMA ---
 
 @bot.on_message(filters.text & ~filters.command(ALL_COMMANDS))
 async def handle_mode_input(_, message: Message):
@@ -497,8 +490,6 @@ async def handle_mode_input(_, message: Message):
             ),
         )
 
-
-# --- RENDER HEALTHCHECK WEB SUNUCUSU ---
 
 async def start_web_server():
     app = web.Application()

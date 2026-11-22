@@ -427,11 +427,23 @@ async def _download_tg_file_to_disk(
     err_desc = str((info or {}).get("description") or "")
     client = getattr(_player_mod, "assistant", None)
     if "file is too big" in err_desc.lower() and client is not None and msg:
-        chat_id = (msg.get("chat") or {}).get("id")
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        chat_type = str(chat.get("type") or "").lower()
         message_id = msg.get("message_id")
+        if chat_type == "private":
+            raise RuntimeError(
+                "20 MB ustu dosyalar bota ozel mesajdan indirilemez. "
+                "Dosyayi hedef gruba gonderip o mesaja yanit vererek /video veya /oynat yazin."
+            )
         if chat_id and message_id:
+            cid = int(chat_id)
+            try:
+                await client.resolve_peer(cid)
+            except Exception:
+                pass
             target_file = os.path.join(DOWNLOAD_DIR, f"tg_{file_id[-12:]}{suffix or '.mp4'}")
-            tg_msg = await client.get_messages(int(chat_id), int(message_id))
+            tg_msg = await client.get_messages(cid, int(message_id))
             downloaded = await client.download_media(tg_msg, file_name=target_file)
             if downloaded and os.path.exists(str(downloaded)):
                 return str(downloaded)

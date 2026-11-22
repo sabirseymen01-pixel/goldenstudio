@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import subprocess
 import uuid
 import yt_dlp
 from config import DOWNLOAD_DIR
@@ -40,6 +41,38 @@ async def get_stream_info(query: str, video: bool = False) -> dict:
             }
 
     return await loop.run_in_executor(None, _extract)
+
+
+async def prepare_image_presentation(image_path: str) -> str:
+    """
+    Görseli sesli sohbette kesintisiz video yayını olarak açmak için döngülü MP4 sunuma çevirir.
+    """
+    loop = asyncio.get_running_loop()
+    out_path = os.path.splitext(image_path)[0] + "_sunum.mp4"
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-loop", "1",
+        "-i", image_path,
+        "-f", "lavfi",
+        "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+        "-c:v", "libx264",
+        "-tune", "stillimage",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-pix_fmt", "yuv420p",
+        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        "-shortest",
+        "-movflags", "+faststart",
+        out_path,
+    ]
+
+    def _run():
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return out_path
+
+    return await loop.run_in_executor(None, _run)
 
 
 async def download_media(query: str, mode: str = "mp3") -> dict:

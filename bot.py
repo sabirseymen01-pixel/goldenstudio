@@ -510,6 +510,8 @@ async def main():
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     await start_web_server()
     await bot.start()
+    me = await bot.get_me()
+    print(f"AKTIF BOT: @{me.username} (ID: {me.id})", flush=True)
     await assistant.start()
     await call_py.start()
     print("Golden Studio basariyla baslatildi!", flush=True)

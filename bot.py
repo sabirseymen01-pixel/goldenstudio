@@ -8,8 +8,7 @@ from aiohttp import web
 from config import BOT_TOKEN, PORT, DOWNLOAD_DIR
 from media_engine import prepare_slideshow_presentation
 from player import (
-    assistant,
-    call_py,
+    init_player,
     play_or_queue,
     start_or_enqueue,
     skip_track,
@@ -28,6 +27,9 @@ from playlist_manager import (
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 USER_MODE: dict[int, str] = {}
 SLIDE_COLLECTORS: dict[tuple[int, int], list[str]] = {}
+
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"}
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 
 # Tekrar / spam korumasi
 _ACTION_COOLDOWN_SEC = 2.0
@@ -387,12 +389,17 @@ async def _handle_media_message(http: Any, msg: dict[str, Any], force_presentati
 
     media_obj = msg.get("video") or msg.get("audio") or msg.get("voice") or msg.get("document")
     if media_obj:
-        mime = media_obj.get("mime_type") or ""
-        is_vid = bool(msg.get("video")) or mime.startswith("video/")
-        is_aud = bool(msg.get("audio") or msg.get("voice")) or mime.startswith("audio/")
+        mime = (media_obj.get("mime_type") or "").lower()
+        file_name = (media_obj.get("file_name") or "").lower()
+        ext = os.path.splitext(file_name)[1]
+
+        is_vid = bool(msg.get("video")) or mime.startswith("video/") or ext in VIDEO_EXTS
+        is_aud = bool(msg.get("audio") or msg.get("voice")) or mime.startswith("audio/") or ext in AUDIO_EXTS
         if not (is_vid or is_aud):
             return
-        local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], ".mp4" if is_vid else ".mp3")
+
+        default_suffix = ext if ext in (AUDIO_EXTS | VIDEO_EXTS) else (".mp4" if is_vid else ".mp3")
+        local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], default_suffix)
         items = await maybe_await(
             resolve_input_items(local_path, mode="video" if is_vid else "audio", requested_by=requester)
         )
@@ -724,8 +731,7 @@ async def main() -> None:
     await start_web_server()
 
     try:
-        await maybe_await(assistant.start())
-        await maybe_await(call_py.start())
+        await init_player()
         print("Asistan ve PyTgCalls baslatildi!", flush=True)
     except Exception as e:
         print(f"[ASISTAN UYARISI] {e}", flush=True)

@@ -6,6 +6,31 @@ import uuid
 import yt_dlp
 from config import DOWNLOAD_DIR
 
+COOKIES_FILE_PATH = "/tmp/yt_cookies.txt"
+
+
+def _get_cookiefile_path() -> str | None:
+    raw_cookies = (os.getenv("YT_COOKIES") or "").strip()
+    if not raw_cookies:
+        return None
+    # Render env'de tek satır veya kaçışlı \n olarak yapıştırılmışsa düzelt
+    normalized = raw_cookies.replace("\\n", "\n")
+    with open(COOKIES_FILE_PATH, "w", encoding="utf-8") as f:
+        f.write(normalized + ("\n" if not normalized.endswith("\n") else ""))
+    return COOKIES_FILE_PATH
+
+
+def _base_ydl_opts() -> dict:
+    opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    cookie_path = _get_cookiefile_path()
+    if cookie_path and os.path.exists(cookie_path):
+        opts["cookiefile"] = cookie_path
+    return opts
+
 
 def _clean_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", name)[:80].strip()
@@ -19,10 +44,8 @@ async def get_stream_info(query: str, video: bool = False) -> dict:
     search_query = query if query.startswith(("http://", "https://")) else f"ytsearch1:{query}"
 
     ydl_opts = {
+        **_base_ydl_opts(),
         "format": "best[height<=720][ext=mp4]/best[height<=720]/best" if video else "bestaudio/best",
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
         "extract_flat": False,
     }
 
@@ -87,11 +110,9 @@ async def download_media(query: str, mode: str = "mp3") -> dict:
 
     if mode == "mp3":
         ydl_opts = {
+            **_base_ydl_opts(),
             "format": "bestaudio/best",
             "outtmpl": out_tmpl,
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
             "postprocessors": [
                 {
                     "key": "FFmpegExtractAudio",
@@ -102,12 +123,10 @@ async def download_media(query: str, mode: str = "mp3") -> dict:
         }
     else:
         ydl_opts = {
+            **_base_ydl_opts(),
             "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
             "outtmpl": out_tmpl,
             "merge_output_format": "mp4",
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
         }
 
     def _download():

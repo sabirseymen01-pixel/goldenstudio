@@ -538,7 +538,6 @@ async def main():
     asyncio.create_task(_start_media_stack())
     print("Golden Studio basariyla baslatildi!", flush=True)
     await pyrogram.idle()
-    await bot.stop()
 
 
 if __name__ == "__main__":

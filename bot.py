@@ -1,7 +1,6 @@
 import asyncio
 import os
 from aiohttp import web
-import pyrogram
 from pyrogram import Client, filters
 from pyrogram.handlers import RawUpdateHandler
 from pyrogram.types import (
@@ -520,24 +519,20 @@ async def start_web_server():
     await site.start()
 
 
-async def _start_media_stack():
-    try:
-        await assistant.start()
-        await call_py.start()
-        print("Asistan ve PyTgCalls baslatildi!", flush=True)
-    except Exception as e:
-        print(f"[ASISTAN UYARISI] {e}", flush=True)
-
-
 async def main():
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     await start_web_server()
     await bot.start()
     me = await bot.get_me()
     print(f"AKTIF BOT: @{me.username} (ID: {me.id})", flush=True)
-    asyncio.create_task(_start_media_stack())
+    try:
+        await assistant.start()
+        await call_py.start()
+        print("Asistan ve PyTgCalls baslatildi!", flush=True)
+    except Exception as e:
+        print(f"[ASISTAN UYARISI] {e}", flush=True)
     print("Golden Studio basariyla baslatildi!", flush=True)
-    await pyrogram.idle()
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":

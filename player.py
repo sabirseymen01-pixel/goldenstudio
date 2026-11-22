@@ -25,6 +25,7 @@ assistant: Client | None = None
 call_py: PyTgCalls | None = None
 _CHAT_LOCKS: dict[int, asyncio.Lock] = {}
 _LAST_ATTEMPT: dict[int, float] = defaultdict(float)
+_CHAT_VOLUME: dict[int, int] = defaultdict(lambda: 100)
 
 _USE_1080 = os.getenv("STREAM_HEIGHT", "720").strip() == "1080"
 _VIDEO_QUALITY = (
@@ -32,6 +33,82 @@ _VIDEO_QUALITY = (
     if _USE_1080
     else VideoQuality.HD_720p
 )
+
+
+def get_chat_volume(chat_id: int) -> int:
+    return int(_CHAT_VOLUME.get(chat_id, 100))
+
+
+async def set_chat_volume(chat_id: int, volume_pct: int, restart_current: bool = True) -> int:
+    vol = max(0, min(200, int(volume_pct)))
+    _CHAT_VOLUME[chat_id] = vol
+
+    if call_py is not None:
+        for method_name in ("change_volume_call", "set_volume"):
+            fn = getattr(call_py, method_name, None)
+            if callable(fn):
+                try:
+                    res = fn(chat_id, vol)
+                    if asyncio.iscoroutine(res):
+                        await res
+                    break
+                except Exception:
+                    pass
+
+    if restart_current and chat_id in NOW_PLAYING and call_py is not None:
+        async with _get_lock(chat_id):
+            current = NOW_PLAYING.get(chat_id)
+            if current and not current.get("is_video") and current.get("source"):
+                try:
+                    playable, is_video, title, duration = await _resolve_playable_source(
+                        {**current, "source": current["source"]},
+                        volume_pct=vol,
+                    )
+                    _cleanup_track_files(current)
+                    updated = {
+                        **current,
+                        "title": title,
+                        "duration": duration,
+                        "playable": playable,
+                        "is_video": is_video,
+                    }
+                    NOW_PLAYING[chat_id] = updated
+                    stream = _build_stream(playable, is_video)
+                    await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
+                except Exception as e:
+                    print(f"[SES SEVIYE UYARI] {e}", flush=True)
+
+    return vol
+
+
+async def _apply_audio_volume(src_path: str, volume_pct: int) -> str:
+    if volume_pct == 100:
+        return src_path
+    out_dir = os.path.join(DOWNLOAD_DIR, "renders")
+    os.makedirs(out_dir, exist_ok=True)
+    base = os.path.splitext(os.path.basename(src_path))[0]
+    out_path = os.path.join(out_dir, f"vol_{volume_pct}_{base}.mp3")
+    gain = round(volume_pct / 100.0, 2)
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-i",
+        src_path,
+        "-filter:a",
+        f"volume={gain}",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "192k",
+        out_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        err_tail = (stderr.decode("utf-8", errors="ignore") or "").strip().splitlines()[-3:]
+        raise RuntimeError("Ses seviyesi ayarlanamadi: " + " | ".join(err_tail))
+    return out_path
 
 
 def _get_lock(chat_id: int) -> asyncio.Lock:
@@ -135,7 +212,7 @@ def _build_stream(source_url: str, is_video: bool) -> MediaStream:
     )
 
 
-async def _resolve_playable_source(item: dict) -> tuple[str, bool, str, int]:
+async def _resolve_playable_source(item: dict, volume_pct: int | None = None) -> tuple[str, bool, str, int]:
     kind = item.get("kind", "audio")
     src = item.get("source", "")
     title = clean_track_title(item.get("title"), fallback="Bilinmeyen Parca")
@@ -162,7 +239,9 @@ async def _resolve_playable_source(item: dict) -> tuple[str, bool, str, int]:
         return src, True, title, duration
 
     if src and os.path.exists(src):
-        return src, False, title, duration
+        vol = get_chat_volume(0) if volume_pct is None else volume_pct
+        adjusted = await _apply_audio_volume(src, vol)
+        return adjusted, False, title, duration
 
     raise FileNotFoundError("Yerel medya dosyasi bulunamadi.")
 
@@ -190,7 +269,10 @@ async def start_or_enqueue(
             first = prepared_items[0]
             rest = prepared_items[1:]
 
-            playable, is_video, title, duration = await _resolve_playable_source(first)
+            playable, is_video, title, duration = await _resolve_playable_source(
+                first,
+                volume_pct=get_chat_volume(chat_id),
+            )
             track = {
                 **first,
                 "title": title,
@@ -241,7 +323,10 @@ async def skip_track(chat_id: int) -> dict | None:
             if not nxt:
                 break
             try:
-                playable, is_video, title, duration = await _resolve_playable_source(nxt)
+                playable, is_video, title, duration = await _resolve_playable_source(
+                    nxt,
+                    volume_pct=get_chat_volume(chat_id),
+                )
                 track = {
                     **nxt,
                     "title": title,

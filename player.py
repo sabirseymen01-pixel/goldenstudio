@@ -16,6 +16,7 @@ from playlist_manager import (
     add_to_list,
     pop_next,
     clear_list,
+    resolve_input_items,
 )
 
 assistant: Client | None = None
@@ -179,6 +180,20 @@ async def start_or_enqueue(
         preview = dict(items[0])
         preview["queue_position"] = total
         return "queued", preview
+
+
+async def play_or_queue(
+    chat_id: int,
+    query: str,
+    is_video: bool,
+    requested_by: str,
+) -> tuple[str, dict]:
+    """
+    Doğrudan dosya/liste girdisi üzerinden yayın başlatır ya da listeye ekler.
+    """
+    mode = "video" if is_video else "audio"
+    items = await resolve_input_items(query, mode=mode, requested_by=requested_by)
+    return await start_or_enqueue(chat_id, items, play_now_if_idle=True)
 
 
 async def skip_track(chat_id: int) -> dict | None:

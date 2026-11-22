@@ -6,7 +6,10 @@ from pyrogram import Client
 from pytgcalls import PyTgCalls, filters
 from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
 from config import API_ID, API_HASH, SESSION_STRING
-from media_engine import get_stream_info, prepare_image_presentation
+from media_engine import (
+    prepare_image_presentation,
+    prepare_slideshow_presentation,
+)
 from playlist_manager import (
     LISTS,
     NOW_PLAYING,
@@ -96,31 +99,39 @@ def _build_stream(source_url: str, is_video: bool) -> MediaStream:
 
 async def _resolve_playable_source(item: dict) -> tuple[str, bool, str, int]:
     """
-    Dönüş: (playable_url_or_path, is_video, title, duration)
+    Dönüş: (playable_path, is_video, title, duration)
     """
     kind = item.get("kind", "audio")
     src = item.get("source", "")
     title = item.get("title", "Bilinmeyen Parça")
     duration = int(item.get("duration") or 0)
 
+    if kind == "slideshow":
+        sources = item.get("sources") or ([src] if src else [])
+        existing = [p for p in sources if p and os.path.exists(p)]
+        if not existing:
+            raise FileNotFoundError("Slayt oluşturmak için geçerli görsel dosyası bulunamadı.")
+        sec_per_slide = int(item.get("seconds_per_slide") or 6)
+        mp4_path = await prepare_slideshow_presentation(existing, seconds_per_slide=sec_per_slide)
+        est_duration = duration or (len(existing[:15]) * max(2, min(sec_per_slide, 20)))
+        return mp4_path, True, title, est_duration
+
     if kind == "image":
         if not src or not os.path.exists(src):
             raise FileNotFoundError("Sunum için görsel dosyası bulunamadı.")
-        mp4_path = await prepare_image_presentation(src)
-        return mp4_path, True, title, duration
+        duration_sec = int(item.get("duration_sec") or 30)
+        mp4_path = await prepare_image_presentation(src, duration_sec=duration_sec)
+        return mp4_path, True, title, duration or duration_sec
 
     if src and os.path.exists(src) and kind == "video":
         return src, True, title, duration
 
-    if src and os.path.exists(src) and kind == "audio":
+    if src and os.path.exists(src):
         return src, False, title, duration
 
-    is_video = bool(item.get("is_video", False))
-    info = await get_stream_info(src, video=is_video)
-    stream_url = info.get("stream_url")
-    if not stream_url:
-        raise RuntimeError("Akış bağlantısı alınamadı (stream_url boş).")
-    return stream_url, is_video, info.get("title") or title, int(info.get("duration") or duration)
+    raise FileNotFoundError(
+        "Yerel medya dosyası bulunamadı. Lütfen MP3/MP4 dosyası gönderin veya /sunum ile görsel kullanın."
+    )
 
 
 async def start_or_enqueue(
@@ -172,7 +183,7 @@ async def play_or_queue(
     requested_by: str,
 ) -> tuple[str, dict]:
     """
-    Tek parça, liste veya bağlantı üzerinden yayın başlatır ya da listeye ekler.
+    Doğrudan dosya/liste girdisi üzerinden yayın başlatır ya da listeye ekler.
     """
     mode = "video" if is_video else "audio"
     items = await resolve_input_items(query, mode=mode, requested_by=requested_by)
@@ -181,24 +192,26 @@ async def play_or_queue(
 
 async def skip_track(chat_id: int) -> dict | None:
     async with _get_lock(chat_id):
-        nxt = pop_next(chat_id)
-        if nxt:
-            playable, is_video, title, duration = await _resolve_playable_source(nxt)
-            track = {
-                **nxt,
-                "title": title,
-                "duration": duration,
-                "playable": playable,
-                "is_video": is_video,
-            }
-            NOW_PLAYING[chat_id] = track
+        while True:
+            nxt = pop_next(chat_id)
+            if not nxt:
+                break
             try:
+                playable, is_video, title, duration = await _resolve_playable_source(nxt)
+                track = {
+                    **nxt,
+                    "title": title,
+                    "duration": duration,
+                    "playable": playable,
+                    "is_video": is_video,
+                }
+                NOW_PLAYING[chat_id] = track
                 stream = _build_stream(playable, is_video)
                 await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
+                return track
             except Exception:
                 NOW_PLAYING.pop(chat_id, None)
-                raise
-            return track
+                continue
 
         NOW_PLAYING.pop(chat_id, None)
         try:

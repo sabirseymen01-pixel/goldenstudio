@@ -1,5 +1,7 @@
 import asyncio
 import os
+import random
+from collections import defaultdict
 from pyrogram import Client
 from pytgcalls import PyTgCalls, filters
 from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
@@ -24,6 +26,7 @@ assistant = Client(
 
 call_py = PyTgCalls(assistant)
 _CHAT_LOCKS: dict[int, asyncio.Lock] = {}
+_LAST_ATTEMPT: dict[int, float] = defaultdict(float)
 
 
 def _get_lock(chat_id: int) -> asyncio.Lock:
@@ -32,6 +35,47 @@ def _get_lock(chat_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _CHAT_LOCKS[chat_id] = lock
     return lock
+
+
+async def run_protected_call(
+    chat_id: int,
+    coro_factory,
+    *,
+    cooldown_sec: float = 4.0,
+    base_backoff: float = 5.0,
+    max_backoff: float = 60.0,
+    max_retries: int = 3,
+):
+    """
+    Aynı chat_id için çağrılar arasında bekleme süresi koyar ve 409 / 429 / socket.send
+    hatalarında kademeli geri çekilme (backoff) uygular.
+    """
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    last = _LAST_ATTEMPT.get(chat_id, 0.0)
+    elapsed = now - last
+    if elapsed < cooldown_sec:
+        await asyncio.sleep(cooldown_sec - elapsed)
+
+    attempt = 0
+    while True:
+        _LAST_ATTEMPT[chat_id] = loop.time()
+        try:
+            return await coro_factory()
+        except Exception as exc:
+            msg = str(exc).lower()
+            is_conflict = "409" in msg or "conflict" in msg
+            is_flood = "429" in msg or "flood" in msg or "socket.send" in msg
+
+            if not (is_conflict or is_flood) or attempt >= max_retries:
+                raise
+
+            delay = min(max_backoff, base_backoff * (2 ** attempt)) + random.uniform(0.5, 2.0)
+            if is_flood:
+                delay = max(delay, 12.0)
+
+            attempt += 1
+            await asyncio.sleep(delay)
 
 
 def _build_stream(source_url: str, is_video: bool) -> MediaStream:
@@ -105,7 +149,8 @@ async def start_or_enqueue(
             }
             NOW_PLAYING[chat_id] = track
             try:
-                await call_py.play(chat_id, _build_stream(playable, is_video))
+                stream = _build_stream(playable, is_video)
+                await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
             except Exception:
                 NOW_PLAYING.pop(chat_id, None)
                 raise
@@ -148,7 +193,8 @@ async def skip_track(chat_id: int) -> dict | None:
             }
             NOW_PLAYING[chat_id] = track
             try:
-                await call_py.play(chat_id, _build_stream(playable, is_video))
+                stream = _build_stream(playable, is_video)
+                await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
             except Exception:
                 NOW_PLAYING.pop(chat_id, None)
                 raise
@@ -156,7 +202,12 @@ async def skip_track(chat_id: int) -> dict | None:
 
         NOW_PLAYING.pop(chat_id, None)
         try:
-            await call_py.leave_call(chat_id)
+            await run_protected_call(
+                chat_id,
+                lambda: call_py.leave_call(chat_id),
+                cooldown_sec=2.0,
+                max_retries=1,
+            )
         except Exception:
             pass
         return None
@@ -167,7 +218,12 @@ async def stop_stream(chat_id: int):
         clear_list(chat_id)
         NOW_PLAYING.pop(chat_id, None)
         try:
-            await call_py.leave_call(chat_id)
+            await run_protected_call(
+                chat_id,
+                lambda: call_py.leave_call(chat_id),
+                cooldown_sec=2.0,
+                max_retries=1,
+            )
         except Exception:
             pass
 

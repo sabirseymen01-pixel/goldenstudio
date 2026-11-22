@@ -1,82 +1,44 @@
-import asyncio
-import re
-import yt_dlp
+import os
 
 # chat_id -> list[dict] (üstten aşağı sıralı liste: index 0 en üst/sıradaki)
 LISTS: dict[int, list[dict]] = {}
 NOW_PLAYING: dict[int, dict] = {}
 
 
-def _is_youtube_url(text: str) -> bool:
-    return bool(
-        re.match(
-            r"^https?://(www\.)?(youtube\.com|youtu\.be|m\.youtube\.com)/",
-            text.strip(),
-            re.IGNORECASE,
-        )
-    )
+def _display_title(source: str) -> str:
+    cleaned = source.strip()
+    if os.path.sep in cleaned or "/" in cleaned or "\\" in cleaned:
+        base = os.path.basename(cleaned)
+        name, _ = os.path.splitext(base)
+        return name or base or "Medya Dosyası"
+    return cleaned or "Medya Dosyası"
 
 
 async def resolve_input_items(query: str, mode: str, requested_by: str) -> list[dict]:
     """
     mode: 'audio' | 'video' | 'image'
-    Tek şarkı/link, yerel dosya veya YouTube oynatma listesi için öğe listesi döndürür.
+    Doğrudan medya dosyası veya görsel sunum öğesi üretir.
     """
-    query = query.strip()
+    source = query.strip()
+    title = _display_title(source)
 
     if mode == "image":
         return [
             {
                 "kind": "image",
                 "title": f"Görsel Sunum ({requested_by})",
-                "source": query,
+                "source": source,
                 "is_video": True,
-                "duration": 0,
+                "duration": 30,
                 "requested_by": requested_by,
             }
         ]
 
-    if _is_youtube_url(query) and "list=" in query:
-        loop = asyncio.get_running_loop()
-        ydl_opts = {
-            "extract_flat": True,
-            "quiet": True,
-            "no_warnings": True,
-        }
-
-        def _extract_list():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(query, download=False)
-                entries = info.get("entries") or []
-                items = []
-                for e in entries[:30]:
-                    url = e.get("url") or e.get("webpage_url")
-                    if not url:
-                        vid = e.get("id")
-                        if vid:
-                            url = f"https://www.youtube.com/watch?v={vid}"
-                    if url:
-                        items.append(
-                            {
-                                "kind": "video" if mode == "video" else "audio",
-                                "title": e.get("title", "YouTube Öğesi"),
-                                "source": url,
-                                "is_video": mode == "video",
-                                "duration": int(e.get("duration") or 0),
-                                "requested_by": requested_by,
-                            }
-                        )
-                return items
-
-        found = await loop.run_in_executor(None, _extract_list)
-        if found:
-            return found
-
     return [
         {
             "kind": "video" if mode == "video" else "audio",
-            "title": query,
-            "source": query,
+            "title": title,
+            "source": source,
             "is_video": mode == "video",
             "duration": 0,
             "requested_by": requested_by,
@@ -113,7 +75,7 @@ def reorder_list(chat_id: int, from_pos: int, to_pos: int) -> tuple[bool, str]:
 
     item = lst.pop(from_pos - 1)
     lst.insert(to_pos - 1, item)
-    return True, f"`#{from_pos}` sırasındaki **{item['title']}** -> `#{to_pos}` sırasına taşındı."
+    return True, f"#{from_pos} sırasındaki <b>{item['title']}</b> -> #{to_pos} sırasına taşındı."
 
 
 def pop_next(chat_id: int) -> dict | None:

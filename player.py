@@ -16,18 +16,10 @@ from playlist_manager import (
     add_to_list,
     pop_next,
     clear_list,
-    resolve_input_items,
 )
 
-assistant = Client(
-    name="golden_assistant",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=SESSION_STRING,
-    in_memory=True,
-)
-
-call_py = PyTgCalls(assistant)
+assistant: Client | None = None
+call_py: PyTgCalls | None = None
 _CHAT_LOCKS: dict[int, asyncio.Lock] = {}
 _LAST_ATTEMPT: dict[int, float] = defaultdict(float)
 
@@ -40,6 +32,29 @@ def _get_lock(chat_id: int) -> asyncio.Lock:
     return lock
 
 
+async def init_player() -> None:
+    global assistant, call_py
+    if assistant is None:
+        assistant = Client(
+            name="golden_assistant",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=SESSION_STRING,
+            in_memory=True,
+        )
+    if call_py is None:
+        call_py = PyTgCalls(assistant)
+
+    await assistant.start()
+    await call_py.start()
+
+    @call_py.on_update(filters.stream_end())
+    async def _on_stream_end(_, update):
+        chat_id = getattr(update, "chat_id", None)
+        if chat_id is not None:
+            await skip_track(chat_id)
+
+
 async def run_protected_call(
     chat_id: int,
     coro_factory,
@@ -49,10 +64,6 @@ async def run_protected_call(
     max_backoff: float = 60.0,
     max_retries: int = 3,
 ):
-    """
-    Aynı chat_id için çağrılar arasında bekleme süresi koyar ve 409 / 429 / socket.send
-    hatalarında kademeli geri çekilme (backoff) uygular.
-    """
     loop = asyncio.get_running_loop()
     now = loop.time()
     last = _LAST_ATTEMPT.get(chat_id, 0.0)
@@ -83,7 +94,7 @@ async def run_protected_call(
 
 def _build_stream(source_url: str, is_video: bool) -> MediaStream:
     if not source_url:
-        raise ValueError("Geçerli bir yayın kaynağı (URL veya dosya yolu) bulunamadı.")
+        raise ValueError("Geçerli bir yayın kaynağı bulunamadı.")
     if is_video:
         return MediaStream(
             source_url,
@@ -98,9 +109,6 @@ def _build_stream(source_url: str, is_video: bool) -> MediaStream:
 
 
 async def _resolve_playable_source(item: dict) -> tuple[str, bool, str, int]:
-    """
-    Dönüş: (playable_path, is_video, title, duration)
-    """
     kind = item.get("kind", "audio")
     src = item.get("source", "")
     title = item.get("title", "Bilinmeyen Parça")
@@ -129,9 +137,7 @@ async def _resolve_playable_source(item: dict) -> tuple[str, bool, str, int]:
     if src and os.path.exists(src):
         return src, False, title, duration
 
-    raise FileNotFoundError(
-        "Yerel medya dosyası bulunamadı. Lütfen MP3/MP4 dosyası gönderin veya /sunum ile görsel kullanın."
-    )
+    raise FileNotFoundError("Yerel medya dosyası bulunamadı.")
 
 
 async def start_or_enqueue(
@@ -139,9 +145,8 @@ async def start_or_enqueue(
     items: list[dict],
     play_now_if_idle: bool = True,
 ) -> tuple[str, dict]:
-    """
-    Dönüş: ('playing' | 'queued', track_info)
-    """
+    if call_py is None:
+        raise RuntimeError("PyTgCalls henüz başlatılmadı.")
     if not items:
         raise ValueError("Oynatılacak veya listeye eklenecek öğe bulunamadı.")
 
@@ -176,21 +181,9 @@ async def start_or_enqueue(
         return "queued", preview
 
 
-async def play_or_queue(
-    chat_id: int,
-    query: str,
-    is_video: bool,
-    requested_by: str,
-) -> tuple[str, dict]:
-    """
-    Doğrudan dosya/liste girdisi üzerinden yayın başlatır ya da listeye ekler.
-    """
-    mode = "video" if is_video else "audio"
-    items = await resolve_input_items(query, mode=mode, requested_by=requested_by)
-    return await start_or_enqueue(chat_id, items, play_now_if_idle=True)
-
-
 async def skip_track(chat_id: int) -> dict | None:
+    if call_py is None:
+        return None
     async with _get_lock(chat_id):
         while True:
             nxt = pop_next(chat_id)
@@ -230,18 +223,21 @@ async def stop_stream(chat_id: int):
     async with _get_lock(chat_id):
         clear_list(chat_id)
         NOW_PLAYING.pop(chat_id, None)
-        try:
-            await run_protected_call(
-                chat_id,
-                lambda: call_py.leave_call(chat_id),
-                cooldown_sec=2.0,
-                max_retries=1,
-            )
-        except Exception:
-            pass
+        if call_py is not None:
+            try:
+                await run_protected_call(
+                    chat_id,
+                    lambda: call_py.leave_call(chat_id),
+                    cooldown_sec=2.0,
+                    max_retries=1,
+                )
+            except Exception:
+                pass
 
 
 async def pause_stream(chat_id: int):
+    if call_py is None:
+        raise RuntimeError("PyTgCalls aktif değil.")
     if hasattr(call_py, "pause"):
         await call_py.pause(chat_id)
     else:
@@ -249,14 +245,9 @@ async def pause_stream(chat_id: int):
 
 
 async def resume_stream(chat_id: int):
+    if call_py is None:
+        raise RuntimeError("PyTgCalls aktif değil.")
     if hasattr(call_py, "resume"):
         await call_py.resume(chat_id)
     else:
         await call_py.resume_stream(chat_id)
-
-
-@call_py.on_update(filters.stream_end())
-async def _on_stream_end(_, update):
-    chat_id = getattr(update, "chat_id", None)
-    if chat_id is not None:
-        await skip_track(chat_id)

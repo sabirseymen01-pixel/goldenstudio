@@ -31,6 +31,7 @@ bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
+    in_memory=True,
 )
 
 USER_MODE: dict[int, str] = {}
@@ -129,6 +130,11 @@ WELCOME_TEXT = (
     "• **Üstten Aşağı Liste:** `/liste` ve `/sirala` ile sırayı istediğiniz gibi düzenleyin.\n\n"
     "👇 *Başlamak için aşağıdaki stüdyo butonlarından birini seçin veya doğrudan link/şarkı/dosya gönderin:*"
 )
+
+
+@bot.on_message(filters.all, group=-1)
+async def _debug_log(_, message: Message):
+    print(f"[MESAJ GELDI] Chat: {message.chat.id} | Metin: {message.text}", flush=True)
 
 
 @bot.on_message(filters.command(["start", "studio", "baslat"]))
@@ -506,7 +512,7 @@ async def main():
     await bot.start()
     await assistant.start()
     await call_py.start()
-    print("Golden Studio basariyla baslatildi!")
+    print("Golden Studio basariyla baslatildi!", flush=True)
     await asyncio.Event().wait()
 
 

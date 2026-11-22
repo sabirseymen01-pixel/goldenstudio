@@ -19,7 +19,6 @@ from player import (
     set_chat_volume,
     NOW_PLAYING,
 )
-import player as _player_mod
 from playlist_manager import (
     LISTS,
     resolve_input_items,
@@ -30,6 +29,8 @@ from playlist_manager import (
     save_track_to_catalog,
     list_saved_tracks,
     register_linked_group,
+    unregister_linked_group,
+    sync_bot_active_groups,
     get_linked_groups,
     set_user_target_chat,
     get_user_target_chat,
@@ -41,6 +42,7 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 USER_MODE: dict[int, str] = {}
 SLIDE_COLLECTORS: dict[tuple[int, int], list[str]] = {}
 SELECTED_LIST_IDX: dict[int, int] = {}
+BOT_ID: int | None = None
 
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
@@ -85,32 +87,62 @@ def _detect_media_kind(msg: dict[str, Any]) -> str | None:
     return None
 
 
-def _track_chat_if_group(msg: dict[str, Any]) -> None:
+async def _verify_bot_in_chat(http: Any, chat_id: int) -> bool:
+    if BOT_ID is None:
+        return True
+    res = await tg_call(http, "getChatMember", {"chat_id": chat_id, "user_id": BOT_ID})
+    if not res.get("ok"):
+        return False
+    status = ((res.get("result") or {}).get("status") or "").lower()
+    return status in ("member", "administrator", "creator")
+
+
+async def _refresh_bot_groups(http: Any) -> None:
+    """
+    Sadece botun aktif olarak uyesi oldugu gruplari dogrular ve tutar.
+    """
+    existing = get_linked_groups()
+    valid_groups: list[dict[str, Any]] = []
+    for g in existing:
+        cid = int(g["chat_id"])
+        if await _verify_bot_in_chat(http, cid):
+            valid_groups.append(g)
+    sync_bot_active_groups(valid_groups)
+
+
+async def _track_bot_group_from_msg(http: Any, msg: dict[str, Any]) -> None:
     chat = msg.get("chat") or {}
     cid = chat.get("id")
-    ctype = chat.get("type") or ""
+    ctype = (chat.get("type") or "").lower()
     if cid and ctype in ("group", "supergroup", "channel"):
-        title = chat.get("title") or chat.get("username") or f"Grup {cid}"
-        register_linked_group(int(cid), title, ctype)
+        if await _verify_bot_in_chat(http, int(cid)):
+            title = chat.get("title") or chat.get("username") or f"Grup {cid}"
+            register_linked_group(int(cid), title, ctype)
 
 
-async def _sync_assistant_dialogs() -> None:
-    client = getattr(_player_mod, "assistant", None)
-    if client is None:
+async def handle_my_chat_member(http: Any, mcm: dict[str, Any]) -> None:
+    """
+    Botun bir gruba eklendigini veya cikarildigini aninda algilar.
+    """
+    chat = mcm.get("chat") or {}
+    cid = chat.get("id")
+    ctype = (chat.get("type") or "").lower()
+    if not cid or ctype not in ("group", "supergroup", "channel"):
         return
-    try:
-        async for dialog in client.get_dialogs():
-            chat = getattr(dialog, "chat", None)
-            if chat is None:
-                continue
-            ctype = str(getattr(chat, "type", "") or "").lower()
-            if any(k in ctype for k in ("group", "supergroup", "channel")):
-                cid = getattr(chat, "id", None)
-                title = getattr(chat, "title", None) or getattr(chat, "first_name", None) or f"Grup {cid}"
-                if cid:
-                    register_linked_group(int(cid), str(title), ctype)
-    except Exception as e:
-        print(f"[DIALOG TARAMA UYARI] {e}", flush=True)
+
+    new_member = mcm.get("new_chat_member") or {}
+    member_user = new_member.get("user") or {}
+    if BOT_ID is not None and member_user.get("id") != BOT_ID:
+        return
+
+    new_status = (new_member.get("status") or "").lower()
+    title = chat.get("title") or chat.get("username") or f"Grup {cid}"
+    if new_status in ("member", "administrator", "creator"):
+        register_linked_group(int(cid), title, ctype)
+        print(f"[BOT GRUBA EKLENDI] {title} ({cid}) | Durum: {new_status}", flush=True)
+    elif new_status in ("left", "kicked", "banned"):
+        unregister_linked_group(int(cid))
+        print(f"[BOT GRUPTAN AYRILDI] {title} ({cid}) | Durum: {new_status}", flush=True)
 
 
 def _get_group_name(chat_id: int) -> str:
@@ -123,10 +155,10 @@ def _get_group_name(chat_id: int) -> str:
 WELCOME_TEXT = (
     "✨ <b>GOLDEN STUDIO — VIP MEDYA & YAYIN MERKEZI</b> ✨\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "Once <b>Bagli Gruplar</b> butonundan veya <code>/hedefler</code> ile hedef grubu secin; "
+    "Botun eklendigi gruplardan birini <b>Bagli Gruplar</b> veya <code>/hedefler</code> ile secin; "
     "ardindan dogrudan dosya gonderin veya mesaja yanit vererek yayin baslatin.\n\n"
     "🎛️ <b>Hizli Kullanim:</b>\n"
-    "• <b>Hedef Grup Sec:</b> <code>/hedefler</code> -> grup ismine tiklayin.\n"
+    "• <b>Hedef Grup Sec:</b> <code>/hedefler</code> -> botun ekli oldugu grup ismine tiklayin.\n"
     "• <b>Dosya / Yanitla:</b> MP3/MP4/fotograf gonderin veya yanitlayip <code>/oynat</code>, <code>/video</code>, <code>/sunum</code>, <code>/slayt</code>, <code>/kaydet</code> yazin.\n"
     "• <b>Ses Seviyesi:</b> <code>/ses 0-200</code> veya kontrol butonlari.\n"
     "• <b>Kolay Liste:</b> <code>/liste</code> altindaki butonlarla sirayi degistirin veya <code>/sirala 3 1</code> yazin.\n\n"
@@ -224,7 +256,7 @@ def target_groups_markup(user_id: int | None, active_target: int) -> dict[str, A
         rows.append([{"text": f"{prefix}{title}", "callback_data": f"tgt_set_{gid}"}])
     rows.append(
         [
-            {"text": "🔄 Gruplari Tara", "callback_data": "tgt_refresh"},
+            {"text": "🔄 Gruplari Yenile", "callback_data": "tgt_refresh"},
             {"text": "📋 Liste", "callback_data": "panel_list"},
             {"text": "🔙 Studyo", "callback_data": "panel_home"},
         ]
@@ -234,17 +266,18 @@ def target_groups_markup(user_id: int | None, active_target: int) -> dict[str, A
 
 def _build_targets_panel_text(active_target: int) -> str:
     groups = get_linked_groups()
-    active_name = _get_group_name(active_target) if active_target else "Secilmedi"
+    is_selected = active_target in {int(g["chat_id"]) for g in groups}
+    active_name = _get_group_name(active_target) if is_selected else "Secilmedi"
     lines = [
-        "🎯 <b>BAGLI GRUPLAR & YAYIN HEDEFI</b>",
+        "🎯 <b>BOTUN EKLİ OLDUĞU GRUPLAR</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"✅ <b>Secili Grup:</b> <b>{active_name}</b> <code>({active_target})</code>",
+        f"✅ <b>Secili Grup:</b> <b>{active_name}</b>" + (f" <code>({active_target})</code>" if is_selected else ""),
         "",
     ]
     if not groups:
-        lines.append("Henuz kayitli grup gorunmuyor. Asistanin gruba ekli oldugundan emin olup <b>Gruplari Tara</b> butonuna basin.")
+        lines.append("Botun uye oldugu kayitli grup yok. Botu bir gruba ekleyip o gruptan bir mesaj atin veya <b>Gruplari Yenile</b> butonuna basin.")
     else:
-        lines.append("Asagidaki grup isimlerinden birine tiklayarak hedefi secin, sonra dosyanizi gonderin:")
+        lines.append("Asagidaki gruplardan birine tiklayarak hedefi secin:")
         for idx, g in enumerate(groups[:12], 1):
             gid = int(g["chat_id"])
             gname = str(g.get("title") or gid)
@@ -396,7 +429,7 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
         await send_msg(
             http,
             reply_chat_id,
-            "⚠️ Once <code>/hedefler</code> ile bir grup secin veya grupta dogrudan dosya/komut gonderin.",
+            "⚠️ Once <code>/hedefler</code> ile botun ekli oldugu bir grup secin veya grupta dogrudan dosya/komut gonderin.",
             reply_to_message_id=msg_id,
         )
         return
@@ -620,7 +653,7 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
         return
 
     if data == "tgt_refresh":
-        await _sync_assistant_dialogs()
+        await _refresh_bot_groups(http)
         active_chat = get_user_target_chat(user_id, chat_id)
         await edit_msg(
             http,
@@ -629,7 +662,7 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
             _build_targets_panel_text(active_chat),
             reply_markup=target_groups_markup(user_id, active_chat),
         )
-        await answer_cb(http, cq_id, "Gruplar guncellendi!")
+        await answer_cb(http, cq_id, "Botun ekli oldugu gruplar guncellendi!")
         return
 
     if data == "vol_down":
@@ -649,7 +682,7 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
         return
 
     if data == "panel_targets":
-        await _sync_assistant_dialogs()
+        await _refresh_bot_groups(http)
         active_chat = get_user_target_chat(user_id, chat_id)
         await edit_msg(
             http,
@@ -666,6 +699,17 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
             tgt_id = int(data.split("_", 2)[2])
         except ValueError:
             await answer_cb(http, cq_id, "Gecersiz grup ID", show_alert=True)
+            return
+        if not await _verify_bot_in_chat(http, tgt_id):
+            unregister_linked_group(tgt_id)
+            await edit_msg(
+                http,
+                chat_id,
+                msg_id,
+                _build_targets_panel_text(active_chat),
+                reply_markup=target_groups_markup(user_id, active_chat),
+            )
+            await answer_cb(http, cq_id, "Bot bu grupta aktif degil, listeden cikarildi.", show_alert=True)
             return
         if user_id:
             set_user_target_chat(user_id, tgt_id)
@@ -810,7 +854,7 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
 
 
 async def handle_message(http: Any, msg: dict[str, Any]) -> None:
-    _track_chat_if_group(msg)
+    await _track_bot_group_from_msg(http, msg)
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     msg_id = msg.get("message_id")
@@ -850,7 +894,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             return
 
         if first_token in ("hedefler", "gruplar", "aktar"):
-            await _sync_assistant_dialogs()
+            await _refresh_bot_groups(http)
             target_chat_id = chat_id if chat.get("type") != "private" else get_user_target_chat(user_id, chat_id)
             await send_msg(
                 http,
@@ -1012,16 +1056,23 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
 
 
 async def polling_loop(http: Any) -> None:
+    global BOT_ID
     await tg_call(http, "deleteWebhook", {"drop_pending_updates": False})
     me_res = await tg_call(http, "getMe")
     me = me_res.get("result") or {}
+    if me.get("id"):
+        BOT_ID = int(me["id"])
     print(f"AKTIF BOT (BOT API): @{me.get('username')} (ID: {me.get('id')})", flush=True)
+    await _refresh_bot_groups(http)
 
     offset: int | None = None
     conflict_streak = 0
     while True:
         try:
-            params: dict[str, Any] = {"timeout": 25, "allowed_updates": ["message", "callback_query"]}
+            params: dict[str, Any] = {
+                "timeout": 25,
+                "allowed_updates": ["message", "callback_query", "my_chat_member"],
+            }
             if offset is not None:
                 params["offset"] = offset
             url = f"{API_BASE}/getUpdates"
@@ -1049,6 +1100,8 @@ async def polling_loop(http: Any) -> None:
                     asyncio.create_task(handle_message(http, upd["message"]))
                 elif "callback_query" in upd:
                     asyncio.create_task(handle_callback_query(http, upd["callback_query"]))
+                elif "my_chat_member" in upd:
+                    asyncio.create_task(handle_my_chat_member(http, upd["my_chat_member"]))
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -1071,7 +1124,6 @@ async def main() -> None:
 
     try:
         await init_player()
-        await _sync_assistant_dialogs()
         print("Asistan ve PyTgCalls baslatildi!", flush=True)
     except Exception as e:
         print(f"[ASISTAN UYARISI] {e}", flush=True)

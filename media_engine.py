@@ -37,7 +37,7 @@ def _build_ydl_opts(use_cookies: bool = True) -> dict:
         "noplaylist": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv_embedded", "tv", "android", "web"],
+                "player_client": ["mweb", "ios", "tv_embedded", "web"],
             }
         },
     }
@@ -48,7 +48,7 @@ def _build_ydl_opts(use_cookies: bool = True) -> dict:
     return opts
 
 
-def _extract_with_cookie_fallback(search_query: str, extra_opts: dict, download: bool) -> dict:
+def _extract_with_cookie_fallback(search_query: str, extra_opts: dict, download: bool) -> tuple[dict, dict]:
     last_err: Exception | None = None
     for use_cookies in (True, False):
         ydl_opts = {
@@ -60,7 +60,7 @@ def _extract_with_cookie_fallback(search_query: str, extra_opts: dict, download:
                 info = ydl.extract_info(search_query, download=download)
                 if "entries" in info and info["entries"]:
                     info = info["entries"][0]
-                return info
+                return info, ydl_opts
         except Exception as exc:
             last_err = exc
             msg = str(exc)
@@ -87,7 +87,7 @@ async def get_stream_info(query: str, video: bool = False) -> dict:
     }
 
     def _extract():
-        info = _extract_with_cookie_fallback(search_query, extra_opts, download=False)
+        info, _ = _extract_with_cookie_fallback(search_query, extra_opts, download=False)
         return {
             "title": info.get("title", "Bilinmeyen Parça"),
             "duration": info.get("duration", 0),
@@ -162,20 +162,20 @@ async def download_media(query: str, mode: str = "mp3") -> dict:
         }
 
     def _download():
-        with yt_dlp.YoutubeDL({**_build_ydl_opts(use_cookies=True), **extra_opts}) as ydl:
-            info = _extract_with_cookie_fallback(search_query, extra_opts, download=True)
+        info, used_opts = _extract_with_cookie_fallback(search_query, extra_opts, download=True)
+        with yt_dlp.YoutubeDL(used_opts) as ydl:
             raw_path = ydl.prepare_filename(info)
-            if mode == "mp3":
-                file_path = os.path.splitext(raw_path)[0] + ".mp3"
-            else:
-                file_path = os.path.splitext(raw_path)[0] + ".mp4"
-                if not os.path.exists(file_path) and os.path.exists(raw_path):
-                    file_path = raw_path
-            return {
-                "file_path": file_path,
-                "title": _clean_filename(info.get("title", "Golden_Studio_Media")),
-                "duration": int(info.get("duration") or 0),
-                "performer": info.get("uploader", "Golden Studio"),
-            }
+        if mode == "mp3":
+            file_path = os.path.splitext(raw_path)[0] + ".mp3"
+        else:
+            file_path = os.path.splitext(raw_path)[0] + ".mp4"
+            if not os.path.exists(file_path) and os.path.exists(raw_path):
+                file_path = raw_path
+        return {
+            "file_path": file_path,
+            "title": _clean_filename(info.get("title", "Golden_Studio_Media")),
+            "duration": int(info.get("duration") or 0),
+            "performer": info.get("uploader", "Golden Studio"),
+        }
 
     return await loop.run_in_executor(None, _download)

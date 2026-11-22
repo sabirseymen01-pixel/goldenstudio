@@ -126,7 +126,7 @@ WELCOME_TEXT = (
     "Once <b>Bagli Gruplar</b> butonundan veya <code>/hedefler</code> ile hedef grubu secin; "
     "ardindan dogrudan dosya gonderin veya mesaja yanit vererek yayin baslatin.\n\n"
     "🎛️ <b>Hizli Kullanim:</b>\n"
-    "• <b>Hedef Grup Sec:</b> <code>/hedefler</code> -> grup ismine tiklayin (Orn: <code>Golden Gay Chat</code>).\n"
+    "• <b>Hedef Grup Sec:</b> <code>/hedefler</code> -> grup ismine tiklayin.\n"
     "• <b>Dosya / Yanitla:</b> MP3/MP4/fotograf gonderin veya yanitlayip <code>/oynat</code>, <code>/video</code>, <code>/sunum</code>, <code>/slayt</code>, <code>/kaydet</code> yazin.\n"
     "• <b>Ses Seviyesi:</b> <code>/ses 0-200</code> veya kontrol butonlari.\n"
     "• <b>Kolay Liste:</b> <code>/liste</code> altindaki butonlarla sirayi degistirin veya <code>/sirala 3 1</code> yazin.\n\n"

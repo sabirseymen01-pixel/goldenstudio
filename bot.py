@@ -525,13 +525,13 @@ async def main():
     await bot.start()
     me = await bot.get_me()
     print(f"AKTIF BOT: @{me.username} (ID: {me.id})", flush=True)
-    try:
-        await assistant.start()
-        await call_py.start()
-        print("Asistan ve PyTgCalls baslatildi!", flush=True)
-    except Exception as e:
-        print(f"[ASISTAN UYARISI] {e}", flush=True)
-    print("Golden Studio basariyla baslatildi!", flush=True)
+    # try:
+    #     await assistant.start()
+    #     await call_py.start()
+    #     print("Asistan ve PyTgCalls baslatildi!", flush=True)
+    # except Exception as e:
+    #     print(f"[ASISTAN UYARISI] {e}", flush=True)
+    print("IZOLE BOT TESTI AKTIF - player/assistant KAPALI", flush=True)
     await asyncio.Event().wait()
 
 

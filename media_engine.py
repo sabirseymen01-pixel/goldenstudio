@@ -7,16 +7,26 @@ import yt_dlp
 from config import DOWNLOAD_DIR
 
 COOKIES_FILE_PATH = "/tmp/yt_cookies.txt"
+_COOKIE_LOGGED = False
 
 
 def _get_cookiefile_path() -> str | None:
+    global _COOKIE_LOGGED
     raw_cookies = (os.getenv("YT_COOKIES") or "").strip()
     if not raw_cookies:
+        if not _COOKIE_LOGGED:
+            print("[YT_COOKIES] Ortam degiskeni bos veya tanimli degil.", flush=True)
+            _COOKIE_LOGGED = True
         return None
-    # Render env'de tek satır veya kaçışlı \n olarak yapıştırılmışsa düzelt
-    normalized = raw_cookies.replace("\\n", "\n")
+
+    normalized = raw_cookies.replace("\r\n", "\n").replace("\\n", "\n").strip() + "\n"
     with open(COOKIES_FILE_PATH, "w", encoding="utf-8") as f:
-        f.write(normalized + ("\n" if not normalized.endswith("\n") else ""))
+        f.write(normalized)
+
+    line_count = len([ln for ln in normalized.splitlines() if ln.strip() and not ln.startswith("#")])
+    if not _COOKIE_LOGGED:
+        print(f"[YT_COOKIES] Dosya yazildi ({COOKIES_FILE_PATH}), gecerli satir sayisi: {line_count}", flush=True)
+        _COOKIE_LOGGED = True
     return COOKIES_FILE_PATH
 
 
@@ -25,6 +35,11 @@ def _base_ydl_opts() -> dict:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "mweb", "tv"],
+            }
+        },
     }
     cookie_path = _get_cookiefile_path()
     if cookie_path and os.path.exists(cookie_path):

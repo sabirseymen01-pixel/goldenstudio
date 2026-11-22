@@ -37,7 +37,7 @@ def _base_ydl_opts() -> dict:
         "noplaylist": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["web", "mweb", "tv"],
+                "player_client": ["tv", "android", "web"],
             }
         },
     }

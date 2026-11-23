@@ -536,21 +536,21 @@ async def _merge_photo_and_audio_to_mp4(photo_path: str, audio_path: str, out_pa
         "-i",
         audio_path,
         "-vf",
-        "scale='min(480,iw)':-2,format=yuv420p",
+        "scale='min(320,iw)':-2,format=yuv420p",
         "-c:v",
         "libx264",
         "-preset",
         "ultrafast",
         "-crf",
-        "34",
+        "36",
         "-r",
-        "5",
+        "3",
         "-threads",
         "1",
         "-c:a",
         "aac",
         "-b:a",
-        "64k",
+        "48k",
         "-shortest",
         "-movflags",
         "+faststart",
@@ -1489,6 +1489,12 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
 
         if combo.get("step") == "waiting_audio":
             photo_path = combo.get("photo_path")
+            try:
+                if photo_path and os.path.exists(photo_path):
+                    os.remove(photo_path)
+            except OSError:
+                pass
+
             audio_path: str | None = None
             audio_title: str = "Birlesik Parca"
 
@@ -1523,31 +1529,16 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 return
 
             COMBO_SESSIONS.pop((chat_id, user_id), None)
-            wait_res = await send_msg(
-                http,
-                chat_id,
-                f"⏳ <b>Gorsel ve <code>{audio_title}</code> birlestiriliyor...</b>",
-                reply_to_message_id=msg_id,
-            )
-            wait_id = (wait_res.get("result") or {}).get("message_id")
             try:
-                combo_path = os.path.join(DOWNLOAD_DIR, f"combo_{msg_id}_{user_id}.mp4")
-                await _merge_photo_and_audio_to_mp4(photo_path, audio_path, combo_path)
-                try:
-                    if photo_path and os.path.exists(photo_path):
-                        os.remove(photo_path)
-                except OSError:
-                    pass
-
                 item = {
-                    "kind": "video",
-                    "source": combo_path,
+                    "kind": "audio",
+                    "source": audio_path,
                     "title": f"{audio_title} (Gorselli)",
-                    "duration": 86400,
-                    "is_video": True,
+                    "duration": 0,
+                    "is_video": False,
                     "requested_by": requester,
                 }
-                print(f"[YAYINA VERILIYOR] Chat={c_target} | File={combo_path}", flush=True)
+                print(f"[YAYINA VERILIYOR] Chat={c_target} | File={audio_path}", flush=True)
                 status, track = await maybe_await(start_or_enqueue(c_target, [item]))
                 t_title = _sanitize_title(track.get("title"), fallback=f"{audio_title} (Gorselli)")
                 gname = _get_group_name(c_target)
@@ -1556,22 +1547,15 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                     if status == "playing"
                     else f"📑 <b>Gorsel + Sarki Listeye Eklendi ({gname}):</b> <code>{t_title}</code>"
                 )
-                if wait_id:
-                    await edit_msg(http, chat_id, wait_id, done_txt, reply_markup=player_control_markup())
-                else:
-                    await send_msg(http, chat_id, done_txt, reply_markup=player_control_markup(), reply_to_message_id=msg_id)
+                await send_msg(http, chat_id, done_txt, reply_markup=player_control_markup(), reply_to_message_id=msg_id)
             except Exception as e:
-                if photo_path and os.path.exists(photo_path):
-                    try:
-                        os.remove(photo_path)
-                    except OSError:
-                        pass
                 print(f"[KOMBIN HATA] {e}", flush=True)
-                err_txt = f"❌ Birlesik yayin olusturulamadi:\n<code>{_sanitize_title(e, fallback='Hata')}</code>"
-                if wait_id:
-                    await edit_msg(http, chat_id, wait_id, err_txt)
-                else:
-                    await send_msg(http, chat_id, err_txt, reply_to_message_id=msg_id)
+                await send_msg(
+                    http,
+                    chat_id,
+                    f"❌ Yayin baslatilamadi:\n<code>{_sanitize_title(e, fallback='Hata')}</code>",
+                    reply_to_message_id=msg_id,
+                )
             return
 
     if msg.get("photo") or msg.get("video") or msg.get("audio") or msg.get("voice") or msg.get("document"):

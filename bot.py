@@ -42,11 +42,13 @@ from playlist_manager import (
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 USER_MODE: dict[int, str] = {}
 SLIDE_COLLECTORS: dict[tuple[int, int], list[str]] = {}
+COMBO_SESSIONS: dict[tuple[int, int], dict[str, Any]] = {}
 SELECTED_LIST_IDX: dict[int, int] = {}
 BOT_ID: int | None = None
 
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 _ACTION_COOLDOWN_SEC = 1.5
 _LAST_ACTION_TS: dict[tuple[int, int | str, str], float] = {}
@@ -86,6 +88,8 @@ def _detect_media_kind(msg: dict[str, Any]) -> str | None:
     mime = (media_obj.get("mime_type") or "").lower()
     file_name = (media_obj.get("file_name") or "").lower()
     ext = os.path.splitext(file_name)[1]
+    if mime.startswith("image/") or ext in IMAGE_EXTS:
+        return "photo"
     if bool(msg.get("video")) or mime.startswith("video/") or ext in VIDEO_EXTS:
         return "video"
     if bool(msg.get("audio") or msg.get("voice")) or mime.startswith("audio/") or ext in AUDIO_EXTS:
@@ -159,7 +163,7 @@ WELCOME_TEXT = (
     "ardindan dogrudan dosya gonderin veya mesaja yanit vererek yayin baslatin.\n\n"
     "🎛️ <b>Hizli Kullanim:</b>\n"
     "• <b>Hedef Grup Sec:</b> <code>/hedefler</code> -> botun ekli oldugu grup ismine tiklayin.\n"
-    "• <b>Dosya / Yanitla:</b> MP3/MP4/fotograf gonderin veya yanitlayip <code>/oynat</code>, <code>/video</code>, <code>/sunum</code>, <code>/slayt</code>, <code>/kaydet</code> yazin.\n"
+    "• <b>Dosya / Yanitla:</b> MP3/MP4/fotograf gonderin veya yanitlayip <code>/oynat</code>, <code>/video</code>, <code>/sunum</code>, <code>/slayt</code>, <code>/kombin</code>, <code>/kaydet</code> yazin.\n"
     "• <b>Ses Seviyesi:</b> <code>/ses 0-200</code> veya kontrol butonlari.\n"
     "• <b>Kolay Liste:</b> <code>/liste</code> altindaki butonlarla sirayi degistirin veya <code>/sirala 3 1</code> yazin.\n\n"
     "👇 <i>Asagidan bir secenek belirleyin:</i>"
@@ -182,7 +186,10 @@ def main_menu_markup() -> dict[str, Any]:
                 {"text": "🎞️ Slayt Baslat", "callback_data": "mode_slide"},
             ],
             [
+                {"text": "🖼️🎵 Görsel + Şarkı", "callback_data": "mode_combo"},
                 {"text": "💾 Kayitli Sarkilar", "callback_data": "panel_catalog"},
+            ],
+            [
                 {"text": "🎛️ Canli Kontrol", "callback_data": "panel_controls"},
             ],
         ]
@@ -480,6 +487,53 @@ async def _download_tg_file_to_disk(
     raise RuntimeError(f"Dosya yolu alinamadi: {info}")
 
 
+async def _merge_photo_and_audio_to_mp4(photo_path: str, audio_path: str, out_path: str) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        photo_path,
+        "-i",
+        audio_path,
+        "-vf",
+        "scale='min(1280,iw)':-2,format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "27",
+        "-r",
+        "15",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        out_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(out_path):
+        raise RuntimeError("Gorsel ve ses tek akista birlestirilemedi.")
+
+
+async def _extract_photo_from_msg(http: Any, msg: dict[str, Any]) -> str | None:
+    if msg.get("photo"):
+        return await _download_tg_file_to_disk(http, msg["photo"][-1]["file_id"], ".jpg", msg=msg)
+    if _detect_media_kind(msg) == "photo" and msg.get("document"):
+        doc = msg["document"]
+        fname = (doc.get("file_name") or "").lower()
+        ext = os.path.splitext(fname)[1] if os.path.splitext(fname)[1] in IMAGE_EXTS else ".jpg"
+        return await _download_tg_file_to_disk(http, doc["file_id"], ext, msg=msg)
+    return None
+
+
 async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: str, is_video: bool) -> None:
     chat = msg["chat"]
     reply_chat_id = chat["id"]
@@ -624,9 +678,10 @@ async def _handle_media_message(
     hedef_ek = f" (<b>{gname}</b>)" if target_chat_id != reply_chat_id else ""
 
     try:
-        if msg.get("photo"):
-            best_photo = msg["photo"][-1]
-            local_path = await _download_tg_file_to_disk(http, best_photo["file_id"], ".jpg", msg=msg)
+        if msg.get("photo") or _detect_media_kind(msg) == "photo":
+            local_path = await _extract_photo_from_msg(http, msg)
+            if not local_path:
+                return
             c_chat = collector_chat_id or reply_chat_id
 
             if user_id and (c_chat, user_id) in SLIDE_COLLECTORS and not force_presentation:
@@ -934,6 +989,19 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
             await answer_cb(http, cq_id, "Slayt modu acildi!")
             await send_msg(http, chat_id, "🎞️ Slayt modu basladi. Fotograflari gonderin, bitince <code>/slayt bitir</code> yazin.")
             return
+        if user_id and mode == "combo":
+            COMBO_SESSIONS[(chat_id, user_id)] = {
+                "step": "waiting_photo",
+                "target_chat_id": active_chat,
+                "photo_path": None,
+            }
+            await answer_cb(http, cq_id, "1/2 Gorsel bekleniyor!")
+            await send_msg(
+                http,
+                chat_id,
+                "🖼️🎵 <b>1/2 Adim:</b> Grup sohbetinden veya buradan once <b>resim/fotograf</b> gonderin (iptal: <code>/kombin iptal</code>).",
+            )
+            return
         if user_id:
             USER_MODE[user_id] = mode
         await answer_cb(http, cq_id, "Mod secildi!")
@@ -1013,6 +1081,26 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 chat_id,
                 _build_targets_panel_text(target_chat_id),
                 reply_markup=target_groups_markup(user_id, target_chat_id),
+                reply_to_message_id=msg_id,
+            )
+            return
+
+        if first_token in ("kombin", "birlesik"):
+            if not user_id:
+                return
+            if arg_str.lower() in ("iptal", "temizle"):
+                COMBO_SESSIONS.pop((chat_id, user_id), None)
+                await send_msg(http, chat_id, "🗑️ Gorsel+Sarki adimi iptal edildi.", reply_to_message_id=msg_id)
+                return
+            COMBO_SESSIONS[(chat_id, user_id)] = {
+                "step": "waiting_photo",
+                "target_chat_id": target_chat_id,
+                "photo_path": None,
+            }
+            await send_msg(
+                http,
+                chat_id,
+                "🖼️🎵 <b>1/2 Adim:</b> Grup sohbetinden veya buradan once <b>resim/fotograf</b> gonderin (iptal: <code>/kombin iptal</code>).",
                 reply_to_message_id=msg_id,
             )
             return
@@ -1155,10 +1243,70 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 await send_msg(
                     http,
                     chat_id,
-                    "Fotografa yanit verip <code>/sunum</code> yazin veya dogrudan fotograf gonderin.",
+                    "Fotografa yanit verip <code>/sunum</code> veya <code>/sunum &lt;kayitli_sarki_adi&gt;</code> yazin.",
                     reply_to_message_id=msg_id,
                 )
                 return
+
+            if arg_str:
+                matched_audio = None
+                needle = arg_str.lower()
+                for tr in list_saved_tracks(100):
+                    t_title = str(tr.get("title") or "").lower()
+                    t_src = str(tr.get("source") or "")
+                    if needle in t_title and t_src and os.path.exists(t_src):
+                        matched_audio = tr
+                        break
+
+                if not matched_audio:
+                    await send_msg(
+                        http,
+                        chat_id,
+                        f"⚠️ Katalogda <code>{arg_str}</code> adinda kayitli sarki bulunamadi. Once <code>/kaydet</code> ile kaydedin veya sadece <code>/sunum</code> yazin.",
+                        reply_to_message_id=msg_id,
+                    )
+                    return
+
+                wait_res = await send_msg(
+                    http,
+                    chat_id,
+                    f"🖼️🎵 <b>Gorsel ve <code>{matched_audio['title']}</code> birlestiriliyor...</b>",
+                    reply_to_message_id=msg_id,
+                )
+                wait_id = (wait_res.get("result") or {}).get("message_id")
+                try:
+                    img_path = await _download_tg_file_to_disk(http, target["photo"][-1]["file_id"], ".jpg", msg=target)
+                    combo_path = os.path.join(DOWNLOAD_DIR, f"combo_{target['photo'][-1]['file_id'][-10:]}.mp4")
+                    await _merge_photo_and_audio_to_mp4(img_path, matched_audio["source"], combo_path)
+
+                    item = {
+                        "kind": "video",
+                        "source": combo_path,
+                        "title": f"{matched_audio['title']} (Gorselli)",
+                        "duration": 86400,
+                        "is_video": True,
+                        "requested_by": requester,
+                    }
+                    status, track = await maybe_await(start_or_enqueue(target_chat_id, [item]))
+                    gname = _get_group_name(target_chat_id)
+                    done_txt = (
+                        f"🖼️🎵 <b>Gorsel + Sarki Yayinda ({gname}):</b> <code>{track['title']}</code>"
+                        if status == "playing"
+                        else f"📑 <b>Gorsel + Sarki Listeye Eklendi ({gname}):</b> <code>{track['title']}</code>"
+                    )
+                    if wait_id:
+                        await edit_msg(http, chat_id, wait_id, done_txt, reply_markup=player_control_markup())
+                    else:
+                        await send_msg(http, chat_id, done_txt, reply_markup=player_control_markup(), reply_to_message_id=msg_id)
+                except Exception as e:
+                    print(f"[SUNUM+SES HATA] {e}", flush=True)
+                    err_txt = f"❌ Birlesik yayin olusturulamadi:\n<code>{e}</code>"
+                    if wait_id:
+                        await edit_msg(http, chat_id, wait_id, err_txt)
+                    else:
+                        await send_msg(http, chat_id, err_txt, reply_to_message_id=msg_id)
+                return
+
             await _handle_media_message(
                 http,
                 target,
@@ -1255,6 +1403,106 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
         if first_token in ("stop", "dur"):
             await maybe_await(stop_stream(target_chat_id))
             await send_msg(http, chat_id, "⏹️ Yayin durduruldu ve liste temizlendi.", reply_to_message_id=msg_id)
+            return
+
+    combo = COMBO_SESSIONS.get((chat_id, user_id)) if user_id else None
+    if combo and not text.startswith("/"):
+        c_target = int(combo.get("target_chat_id") or target_chat_id)
+        if combo.get("step") == "waiting_photo":
+            p_path = await _extract_photo_from_msg(http, msg)
+            if p_path:
+                combo["photo_path"] = p_path
+                combo["step"] = "waiting_audio"
+                await send_msg(
+                    http,
+                    chat_id,
+                    "✅ Gorsel alindi.\n🎵 <b>2/2 Adim:</b> Grup sohbetinden veya buradan <b>sarki dosyasi</b> gonderin ya da <b>kayitli sarki adi</b> yazin.",
+                    reply_to_message_id=msg_id,
+                )
+            else:
+                await send_msg(
+                    http,
+                    chat_id,
+                    "⚠️ Lutfen 1. adim icin once bir <b>resim/fotograf</b> gonderin (iptal: <code>/kombin iptal</code>).",
+                    reply_to_message_id=msg_id,
+                )
+            return
+
+        if combo.get("step") == "waiting_audio":
+            photo_path = combo.get("photo_path")
+            audio_path: str | None = None
+            audio_title: str = "Birlesik Parca"
+
+            media_obj = msg.get("audio") or msg.get("voice") or msg.get("document")
+            if media_obj and _detect_media_kind(msg) == "audio":
+                file_name = (media_obj.get("file_name") or "").lower()
+                ext = os.path.splitext(file_name)[1] or ".mp3"
+                audio_path = await _download_tg_file_to_disk(http, media_obj["file_id"], ext, msg=msg)
+                audio_title = clean_track_title(extract_media_title(msg, media_obj=media_obj, local_path=audio_path), fallback="Ses")
+            elif text:
+                needle = text.lower()
+                for tr in list_saved_tracks(100):
+                    t_title = str(tr.get("title") or "").lower()
+                    t_src = str(tr.get("source") or "")
+                    if needle in t_title and t_src and os.path.exists(t_src):
+                        audio_path = t_src
+                        audio_title = str(tr.get("title") or text)
+                        break
+                if not audio_path:
+                    await send_msg(
+                        http,
+                        chat_id,
+                        f"⚠️ Katalogda <code>{text}</code> bulunamadi. Ses dosyasi gonderin veya kayitli sarki adi yazin.",
+                        reply_to_message_id=msg_id,
+                    )
+                    return
+            else:
+                await send_msg(
+                    http,
+                    chat_id,
+                    "⚠️ Lutfen 2. adim icin <b>sarki dosyasi</b> gonderin veya <b>kayitli sarki adi</b> yazin.",
+                    reply_to_message_id=msg_id,
+                )
+                return
+
+            COMBO_SESSIONS.pop((chat_id, user_id), None)
+            wait_res = await send_msg(
+                http,
+                chat_id,
+                f"⏳ <b>Gorsel ve <code>{audio_title}</code> birlestiriliyor...</b>",
+                reply_to_message_id=msg_id,
+            )
+            wait_id = (wait_res.get("result") or {}).get("message_id")
+            try:
+                combo_path = os.path.join(DOWNLOAD_DIR, f"combo_{msg_id}_{user_id}.mp4")
+                await _merge_photo_and_audio_to_mp4(photo_path, audio_path, combo_path)
+
+                item = {
+                    "kind": "video",
+                    "source": combo_path,
+                    "title": f"{audio_title} (Gorselli)",
+                    "duration": 86400,
+                    "is_video": True,
+                    "requested_by": requester,
+                }
+                status, track = await maybe_await(start_or_enqueue(c_target, [item]))
+                gname = _get_group_name(c_target)
+                done_txt = (
+                    f"🖼️🎵 <b>Gorsel + Sarki Yayinda ({gname}):</b> <code>{track['title']}</code>"
+                    if status == "playing"
+                    else f"📑 <b>Gorsel + Sarki Listeye Eklendi ({gname}):</b> <code>{track['title']}</code>"
+                )
+                if wait_id:
+                    await edit_msg(http, chat_id, wait_id, done_txt, reply_markup=player_control_markup())
+                else:
+                    await send_msg(http, chat_id, done_txt, reply_markup=player_control_markup(), reply_to_message_id=msg_id)
+            except Exception as e:
+                print(f"[KOMBIN HATA] {e}", flush=True)
+                err_txt = f"❌ Birlesik yayin olusturulamadi:\n<code>{e}</code>"
+                if wait_id:
+                    await edit_msg(http, chat_id, wait_id, err_txt)
+                else:
+                    await send_msg(http, chat_id, err_txt, reply_to_message_id=msg_id)
             return
 
     if msg.get("photo") or msg.get("video") or msg.get("audio") or msg.get("voice") or msg.get("document"):

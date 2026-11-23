@@ -418,7 +418,7 @@ async def _download_tg_file_to_disk(
         ext = os.path.splitext(file_path_tg)[1] or suffix
         local_path = os.path.join(DOWNLOAD_DIR, f"tg_{file_id[-12:]}{ext}")
         dl_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path_tg}"
-        async with http.get(dl_url, timeout=180) as resp:
+        async with http.get(dl_url, timeout=300) as resp:
             resp.raise_for_status()
             with open(local_path, "wb") as out:
                 out.write(await resp.read())
@@ -426,7 +426,12 @@ async def _download_tg_file_to_disk(
 
     err_desc = str((info or {}).get("description") or "")
     client = getattr(_player_mod, "assistant", None)
-    if "file is too big" in err_desc.lower() and client is not None and msg:
+    if "file is too big" in err_desc.lower():
+        if client is None:
+            raise RuntimeError("20 MB ustu dosya icin asistan (Pyrogram) aktif degil.")
+        if not msg:
+            raise RuntimeError("20 MB ustu dosya icin mesaj bilgisi eksik.")
+
         chat = msg.get("chat") or {}
         chat_id = chat.get("id")
         chat_type = str(chat.get("type") or "").lower()
@@ -436,17 +441,27 @@ async def _download_tg_file_to_disk(
                 "20 MB ustu dosyalar bota ozel mesajdan indirilemez. "
                 "Dosyayi hedef gruba gonderip o mesaja yanit vererek /video veya /oynat yazin."
             )
-        if chat_id and message_id:
-            cid = int(chat_id)
-            try:
-                await client.resolve_peer(cid)
-            except Exception:
-                pass
-            target_file = os.path.join(DOWNLOAD_DIR, f"tg_{file_id[-12:]}{suffix or '.mp4'}")
+        if not chat_id or not message_id:
+            raise RuntimeError("20 MB ustu dosya icin chat_id veya message_id bulunamadi.")
+
+        cid = int(chat_id)
+        try:
+            await client.resolve_peer(cid)
+        except Exception:
+            pass
+
+        target_file = os.path.join(DOWNLOAD_DIR, f"tg_{file_id[-12:]}{suffix or '.mp4'}")
+        print(f"[ASISTAN INDIRME BASLADI] Chat: {cid} | Msg: {message_id}", flush=True)
+        try:
             tg_msg = await client.get_messages(cid, int(message_id))
             downloaded = await client.download_media(tg_msg, file_name=target_file)
-            if downloaded and os.path.exists(str(downloaded)):
-                return str(downloaded)
+        except Exception as py_err:
+            raise RuntimeError(f"Asistan indirme hatasi: {py_err}") from py_err
+
+        if downloaded and os.path.exists(str(downloaded)):
+            print(f"[ASISTAN INDIRME TAMAM] {downloaded}", flush=True)
+            return str(downloaded)
+        raise RuntimeError("Asistan dosyayi diske kaydedemedi.")
 
     raise RuntimeError(f"Dosya yolu alinamadi: {info}")
 

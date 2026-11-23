@@ -57,6 +57,18 @@ _LAST_ACTION_TS: dict[tuple[int, int | str, str], float] = {}
 _ACTIVE_ACTION_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 
 
+def _sanitize_title(raw: Any, fallback: str = "Parca") -> str:
+    txt = str(raw or "").strip()
+    txt = re.sub(r"<\s*unknown\s*>", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"<[^>]*>", "", txt)
+    txt = html.unescape(txt).replace("<", "").replace(">", "")
+    txt = re.sub(r"\s+", " ", txt).strip(" -_.")
+    cleaned = clean_track_title(txt, fallback=fallback)
+    cleaned = re.sub(r"<\s*unknown\s*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<[^>]*>", "", cleaned).replace("<", "").replace(">", "").strip()
+    return cleaned or fallback
+
+
 def _is_duplicate_action(
     chat_id: int,
     actor_id: int | str | None,
@@ -125,7 +137,7 @@ async def _track_bot_group_from_msg(http: Any, msg: dict[str, Any]) -> None:
     ctype = (chat.get("type") or "").lower()
     if cid and ctype in ("group", "supergroup", "channel"):
         if await _verify_bot_in_chat(http, int(cid)):
-            title = chat.get("title") or chat.get("username") or f"Grup {cid}"
+            title = _sanitize_title(chat.get("title") or chat.get("username"), fallback=f"Grup {cid}")
             register_linked_group(int(cid), title, ctype)
 
 
@@ -142,7 +154,7 @@ async def handle_my_chat_member(http: Any, mcm: dict[str, Any]) -> None:
         return
 
     new_status = (new_member.get("status") or "").lower()
-    title = chat.get("title") or chat.get("username") or f"Grup {cid}"
+    title = _sanitize_title(chat.get("title") or chat.get("username"), fallback=f"Grup {cid}")
     if new_status in ("member", "administrator", "creator"):
         register_linked_group(int(cid), title, ctype)
         print(f"[BOT GRUBA EKLENDI] {title} ({cid}) | Durum: {new_status}", flush=True)
@@ -154,7 +166,7 @@ async def handle_my_chat_member(http: Any, mcm: dict[str, Any]) -> None:
 def _get_group_name(chat_id: int) -> str:
     for g in get_linked_groups():
         if int(g.get("chat_id", 0)) == int(chat_id):
-            return str(g.get("title") or chat_id)
+            return _sanitize_title(g.get("title"), fallback=str(chat_id))
     return str(chat_id)
 
 
@@ -260,7 +272,7 @@ def target_groups_markup(user_id: int | None, active_target: int) -> dict[str, A
     rows: list[list[dict[str, str]]] = []
     for g in groups[:12]:
         gid = int(g["chat_id"])
-        title = str(g.get("title") or gid)[:32]
+        title = _sanitize_title(g.get("title"), fallback=str(gid))[:32]
         prefix = "✅ " if gid == active_target else "👥 "
         rows.append([{"text": f"{prefix}{title}", "callback_data": f"tgt_set_{gid}"}])
     rows.append(
@@ -292,7 +304,7 @@ def _build_targets_panel_text(active_target: int) -> str:
         lines.append("Asagidaki gruplardan birine tiklayarak hedefi secin:")
         for idx, g in enumerate(groups[:12], 1):
             gid = int(g["chat_id"])
-            gname = str(g.get("title") or gid)
+            gname = _sanitize_title(g.get("title"), fallback=str(gid))
             mark = " ✅" if gid == active_target else ""
             lines.append(f"<b>{idx}.</b> {gname}{mark}")
     return "\n".join(lines)
@@ -327,13 +339,15 @@ def _build_list_text(chat_id: int, user_id: int | None = None) -> str:
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     if current:
-        lines.append(f"▶️ <b>Yayinda:</b> {_kind_icon(current)} <code>{current['title']}</code>")
+        c_title = _sanitize_title(current.get("title"), fallback="Parca")
+        lines.append(f"▶️ <b>Yayinda:</b> {_kind_icon(current)} <code>{c_title}</code>")
     if not lst:
         lines.append("Sirada bekleyen baska oge yok.")
     else:
         for idx, item in enumerate(lst, 1):
             pointer = "👉 " if idx == sel else ""
-            lines.append(f"{pointer}<b>{idx}.</b> {_kind_icon(item)} <code>{item['title']}</code>")
+            i_title = _sanitize_title(item.get("title"), fallback="Parca")
+            lines.append(f"{pointer}<b>{idx}.</b> {_kind_icon(item)} <code>{i_title}</code>")
     lines.append("\n💡 <i>Butonla secip tasiyabilir veya</i> <code>/sirala 3 1</code> <i>yazabilirsiniz.</i>")
     return "\n".join(lines)
 
@@ -511,6 +525,7 @@ async def _download_tg_file_to_disk(
 
 
 async def _merge_photo_and_audio_to_mp4(photo_path: str, audio_path: str, out_path: str) -> None:
+    print(f"[FFMPEG BASLADI] Photo={photo_path} | Audio={audio_path}", flush=True)
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-y",
@@ -521,15 +536,17 @@ async def _merge_photo_and_audio_to_mp4(photo_path: str, audio_path: str, out_pa
         "-i",
         audio_path,
         "-vf",
-        "scale='min(640,iw)':-2,format=yuv420p",
+        "scale='min(480,iw)':-2,format=yuv420p",
         "-c:v",
         "libx264",
         "-preset",
         "ultrafast",
         "-crf",
-        "32",
+        "34",
         "-r",
-        "8",
+        "5",
+        "-threads",
+        "1",
         "-c:a",
         "aac",
         "-b:a",
@@ -547,6 +564,7 @@ async def _merge_photo_and_audio_to_mp4(photo_path: str, audio_path: str, out_pa
         short_err = err_tail[-1] if err_tail else "Bilinmeyen ffmpeg hatasi"
         print(f"[FFMPEG STDERR] {' | '.join(err_tail[-4:])}", flush=True)
         raise RuntimeError(f"Gorsel ve ses birlestirilemedi: {short_err}")
+    print(f"[FFMPEG BITTI] Out={out_path}", flush=True)
 
 
 async def _extract_photo_from_msg(http: Any, msg: dict[str, Any]) -> str | None:
@@ -594,9 +612,10 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
         return
 
     async with scope_lock:
-        requester = (msg.get("from") or {}).get("first_name") or "Uye"
+        requester = _sanitize_title((msg.get("from") or {}).get("first_name"), fallback="Uye")
         try:
             status, track = await maybe_await(play_or_queue(target_chat_id, query_text, is_video, requester))
+            t_title = _sanitize_title(track.get("title"), fallback="Parca")
             dur = format_duration(track.get("duration", 0))
             kind = "🎬 Video" if is_video else "🎵 Ses"
             vol = get_chat_volume(target_chat_id)
@@ -606,7 +625,7 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
                 text = (
                     f"✨ <b>GOLDEN STUDIO — YAYINDA</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎶 <b>Parca:</b> <code>{track['title']}</code>\n"
+                    f"🎶 <b>Parca:</b> <code>{t_title}</code>\n"
                     f"⏱️ <b>Sure:</b> <code>{dur}</code> • {kind} • 🔊 <code>%{vol}</code>\n"
                     f"👤 <b>Isteyen:</b> {requester}{hedef_not}"
                 )
@@ -614,12 +633,12 @@ async def _process_stream_request(http: Any, msg: dict[str, Any], query_text: st
                 q_pos = track.get("queue_position") or len(LISTS.get(target_chat_id, []))
                 text = (
                     f"📑 <b>Listeye Eklendi (#{q_pos})</b>\n"
-                    f"🎶 <b>Parca:</b> <code>{track['title']}</code> (<code>{dur}</code>) • {kind}{hedef_not}"
+                    f"🎶 <b>Parca:</b> <code>{t_title}</code> (<code>{dur}</code>) • {kind}{hedef_not}"
                 )
             await send_msg(http, reply_chat_id, text, reply_markup=player_control_markup(), reply_to_message_id=msg_id)
         except Exception as e:
             print(f"[YAYIN HATA] {e}", flush=True)
-            await send_msg(http, reply_chat_id, f"❌ Yayin baslatilamadi:\n<code>{e}</code>", reply_to_message_id=msg_id)
+            await send_msg(http, reply_chat_id, f"❌ Yayin baslatilamadi:\n<code>{_sanitize_title(e, fallback='Hata')}</code>", reply_to_message_id=msg_id)
 
 
 async def _finalize_slideshow(
@@ -654,11 +673,12 @@ async def _finalize_slideshow(
             "requested_by": requester,
         }
         status, track = await maybe_await(start_or_enqueue(target_chat_id, [item]))
+        t_title = _sanitize_title(track.get("title"), fallback="Slayt Sunumu")
         gname = _get_group_name(target_chat_id)
         msg_txt = (
-            f"🎞️ <b>Slayt Yayinda ({gname}):</b> <code>{track['title']}</code>"
+            f"🎞️ <b>Slayt Yayinda ({gname}):</b> <code>{t_title}</code>"
             if status == "playing"
-            else f"📑 <b>Slayt Listeye Eklendi ({gname}):</b> <code>{track['title']}</code>"
+            else f"📑 <b>Slayt Listeye Eklendi ({gname}):</b> <code>{t_title}</code>"
         )
         if wait_id:
             await edit_msg(http, reply_chat_id, wait_id, msg_txt, reply_markup=player_control_markup())
@@ -666,7 +686,7 @@ async def _finalize_slideshow(
             await send_msg(http, reply_chat_id, msg_txt, reply_markup=player_control_markup())
     except Exception as e:
         print(f"[SLAYT HATA] {e}", flush=True)
-        err_txt = f"❌ Slayt olusturulamadi:\n<code>{e}</code>"
+        err_txt = f"❌ Slayt olusturulamadi:\n<code>{_sanitize_title(e, fallback='Hata')}</code>"
         if wait_id:
             await edit_msg(http, reply_chat_id, wait_id, err_txt)
         else:
@@ -688,7 +708,7 @@ async def _handle_media_message(
     target_reply_id = reply_to_id if reply_to_id is not None else msg["message_id"]
     user = msg.get("from") or {}
     user_id = user.get("id")
-    requester = requester_override or user.get("first_name") or "Uye"
+    requester = _sanitize_title(requester_override or user.get("first_name"), fallback="Uye")
 
     target_chat_id = reply_chat_id if chat.get("type") != "private" else get_user_target_chat(user_id, reply_chat_id)
     if chat.get("type") == "private" and target_chat_id == reply_chat_id:
@@ -721,7 +741,7 @@ async def _handle_media_message(
                 )
                 return
 
-            detected_title = clean_track_title(
+            detected_title = _sanitize_title(
                 custom_title or extract_media_title(msg, local_path=local_path),
                 fallback="Gorsel Sunum",
             )
@@ -730,12 +750,14 @@ async def _handle_media_message(
             )
             for _it in items:
                 _it["duration"] = 86400
+                _it["title"] = _sanitize_title(_it.get("title"), fallback=detected_title)
             status, track = await maybe_await(start_or_enqueue(target_chat_id, items))
+            t_title = _sanitize_title(track.get("title"), fallback=detected_title)
             if status == "playing":
                 await send_msg(
                     http,
                     reply_chat_id,
-                    f"🖼️ <b>Gorsel Sunum Yayinda{hedef_ek}:</b> <code>{track['title']}</code>",
+                    f"🖼️ <b>Gorsel Sunum Yayinda{hedef_ek}:</b> <code>{t_title}</code>",
                     reply_markup=player_control_markup(),
                     reply_to_message_id=target_reply_id,
                 )
@@ -744,7 +766,7 @@ async def _handle_media_message(
                 await send_msg(
                     http,
                     reply_chat_id,
-                    f"📑 <b>Gorsel Sunum Listeye Eklendi (#{q_pos}){hedef_ek}:</b> <code>{track['title']}</code>",
+                    f"📑 <b>Gorsel Sunum Listeye Eklendi (#{q_pos}){hedef_ek}:</b> <code>{t_title}</code>",
                     reply_markup=player_control_markup(),
                     reply_to_message_id=target_reply_id,
                 )
@@ -770,7 +792,7 @@ async def _handle_media_message(
             default_suffix = ext if ext in (AUDIO_EXTS | VIDEO_EXTS) else (".mp4" if is_vid else ".mp3")
             local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], default_suffix, msg=msg)
             detected_title = extract_media_title(msg, media_obj=media_obj, local_path=local_path)
-            final_title = clean_track_title(custom_title or detected_title, fallback="Parca")
+            final_title = _sanitize_title(custom_title or detected_title, fallback="Parca")
 
             items = await maybe_await(
                 resolve_input_items(
@@ -780,13 +802,16 @@ async def _handle_media_message(
                     custom_title=final_title,
                 )
             )
+            for _it in items:
+                _it["title"] = _sanitize_title(_it.get("title"), fallback=final_title)
             status, track = await maybe_await(start_or_enqueue(target_chat_id, items))
+            t_title = _sanitize_title(track.get("title"), fallback=final_title)
             ikon = "🎬" if is_vid else "🎵"
             if status == "playing":
                 await send_msg(
                     http,
                     reply_chat_id,
-                    f"✨ {ikon} <b>Dosya Yayinda{hedef_ek}:</b> <code>{track['title']}</code>",
+                    f"✨ {ikon} <b>Dosya Yayinda{hedef_ek}:</b> <code>{t_title}</code>",
                     reply_markup=player_control_markup(),
                     reply_to_message_id=target_reply_id,
                 )
@@ -795,7 +820,7 @@ async def _handle_media_message(
                 await send_msg(
                     http,
                     reply_chat_id,
-                    f"📑 {ikon} <b>Dosya Listeye Eklendi (#{q_pos}){hedef_ek}:</b> <code>{track['title']}</code>",
+                    f"📑 {ikon} <b>Dosya Listeye Eklendi (#{q_pos}){hedef_ek}:</b> <code>{t_title}</code>",
                     reply_markup=player_control_markup(),
                     reply_to_message_id=target_reply_id,
                 )
@@ -804,7 +829,7 @@ async def _handle_media_message(
         await send_msg(
             http,
             reply_chat_id,
-            f"❌ Medya yayina alinamadi:\n<code>{e}</code>",
+            f"❌ Medya yayina alinamadi:\n<code>{_sanitize_title(e, fallback='Hata')}</code>",
             reply_to_message_id=target_reply_id,
         )
 
@@ -912,7 +937,8 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
         else:
             lines = ["💾 <b>KAYITLI SARKILAR (MONGODB / KATALOG)</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
             for i, t in enumerate(tracks, 1):
-                lines.append(f"<b>{i}.</b> <code>{t['title']}</code>")
+                t_title = _sanitize_title(t.get("title"), fallback="Parca")
+                lines.append(f"<b>{i}.</b> <code>{t_title}</code>")
             lines.append("\n💡 <i>Calmak icin:</i> <code>/oynat &lt;parca_adi&gt;</code>")
             txt = "\n".join(lines)
         await edit_msg(
@@ -973,7 +999,7 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
             _build_list_text(active_chat, user_id),
             reply_markup=list_editor_markup(active_chat, user_id),
         )
-        await answer_cb(http, cq_id, info[:180])
+        await answer_cb(http, cq_id, _sanitize_title(info, fallback="Guncellendi")[:180])
         return
 
     if data == "panel_controls":
@@ -981,14 +1007,16 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
         q_len = len(LISTS.get(active_chat, []))
         vol = get_chat_volume(active_chat)
         gname = _get_group_name(active_chat)
-        status_line = (
-            f"🎶 <b>Yayinda:</b> <code>{current['title']}</code>\n"
-            f"🔊 <b>Ses Seviyesi:</b> <code>%{vol}</code>\n"
-            f"📡 <b>Hedef:</b> <b>{gname}</b>\n"
-            f"📑 <b>Siradaki Oge:</b> <code>{q_len}</code>"
-            if current
-            else f"🔇 <i>Aktif yayin yok.</i>\n🔊 <b>Ses Seviyesi:</b> <code>%{vol}</code>\n📡 <b>Hedef:</b> <b>{gname}</b>"
-        )
+        if current:
+            c_title = _sanitize_title(current.get("title"), fallback="Parca")
+            status_line = (
+                f"🎶 <b>Yayinda:</b> <code>{c_title}</code>\n"
+                f"🔊 <b>Ses Seviyesi:</b> <code>%{vol}</code>\n"
+                f"📡 <b>Hedef:</b> <b>{gname}</b>\n"
+                f"📑 <b>Siradaki Oge:</b> <code>{q_len}</code>"
+            )
+        else:
+            status_line = f"🔇 <i>Aktif yayin yok.</i>\n🔊 <b>Ses Seviyesi:</b> <code>%{vol}</code>\n📡 <b>Hedef:</b> <b>{gname}</b>"
         await edit_msg(
             http,
             chat_id,
@@ -1005,7 +1033,8 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
             await answer_cb(http, cq_id, "Yayinda parca yok.", show_alert=True)
             return
         rec = save_track_to_catalog(cur)
-        await answer_cb(http, cq_id, f"Kaydedildi: {rec['title']}")
+        r_title = _sanitize_title(rec.get("title"), fallback="Parca")
+        await answer_cb(http, cq_id, f"Kaydedildi: {r_title}")
         return
 
     if data.startswith("mode_"):
@@ -1025,7 +1054,7 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
             await send_msg(
                 http,
                 chat_id,
-                "🖼️🎵 <b>1/2 Adim:</b> Grup sohbetinden veya buradan once <b>resim/fotograf</b> gonderin (iptal: <code>/kombin iptal</code>).",
+                "🖼️🎵 <b>1/2 Adim:</b> Once <b>resim/fotograf</b> gonderin (iptal: <code>/kombin iptal</code>).",
             )
             return
         if user_id:
@@ -1049,7 +1078,8 @@ async def handle_callback_query(http: Any, cq: dict[str, Any]) -> None:
     elif data == "ctrl_skip":
         nxt = await maybe_await(skip_track(active_chat))
         if nxt:
-            await send_msg(http, chat_id, f"⏭️ Siradaki: <b>{nxt['title']}</b>")
+            n_title = _sanitize_title(nxt.get("title"), fallback="Parca")
+            await send_msg(http, chat_id, f"⏭️ Siradaki: <b>{n_title}</b>")
         else:
             await send_msg(http, chat_id, "⏹️ Sira bitti, yayin kapatildi.")
         await answer_cb(http, cq_id)
@@ -1069,7 +1099,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
 
     user = msg.get("from") or {}
     user_id = user.get("id")
-    requester = user.get("first_name") or "Uye"
+    requester = _sanitize_title(user.get("first_name"), fallback="Uye")
     reply_msg = msg.get("reply_to_message") or {}
     text_raw = msg.get("text") or msg.get("caption") or ""
     text = text_raw.strip()
@@ -1141,7 +1171,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             await send_msg(
                 http,
                 chat_id,
-                "🖼️🎵 <b>1/2 Adim:</b> Grup sohbetinden veya buradan once <b>resim/fotograf</b> gonderin (iptal: <code>/kombin iptal</code>).",
+                "🖼️🎵 <b>1/2 Adim:</b> Once <b>resim/fotograf</b> gonderin (iptal: <code>/kombin iptal</code>).",
                 reply_to_message_id=msg_id,
             )
             return
@@ -1168,45 +1198,8 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             wait_id = (wait_res.get("result") or {}).get("message_id")
             try:
                 local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], ext, msg=src_msg)
-                if kind == "video":
-                    opt_path = os.path.join(DOWNLOAD_DIR, f"opt_{media_obj['file_id'][-12:]}.mp4")
-                    proc = await asyncio.create_subprocess_exec(
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        local_path,
-                        "-vf",
-                        "scale='min(1280,iw)':-2",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "ultrafast",
-                        "-crf",
-                        "26",
-                        "-r",
-                        "24",
-                        "-g",
-                        "48",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "128k",
-                        "-movflags",
-                        "+faststart",
-                        opt_path,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    await proc.communicate()
-                    if proc.returncode == 0 and os.path.exists(opt_path):
-                        try:
-                            os.remove(local_path)
-                        except OSError:
-                            pass
-                        local_path = opt_path
-
                 auto_title = extract_media_title(src_msg, media_obj=media_obj, local_path=local_path)
-                title = clean_track_title(arg_str or auto_title, fallback="Kayitli Parca")
+                title = _sanitize_title(arg_str or auto_title, fallback="Kayitli Parca")
                 rec = save_track_to_catalog(
                     {
                         "kind": kind,
@@ -1217,16 +1210,17 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                     },
                     custom_title=title,
                 )
+                r_title = _sanitize_title(rec.get("title"), fallback=title)
                 done_txt = (
-                    f"💾 Kataloga kaydedildi: <code>{rec['title']}</code>\n"
-                    f"Listeye almak icin: <code>/video {rec['title']}</code> veya <code>/oynat {rec['title']}</code>"
+                    f"💾 Kataloga kaydedildi: <code>{r_title}</code>\n"
+                    f"Listeye almak icin: <code>/oynat {r_title}</code>"
                 )
                 if wait_id:
                     await edit_msg(http, chat_id, wait_id, done_txt)
                 else:
                     await send_msg(http, chat_id, done_txt, reply_to_message_id=msg_id)
             except Exception as e:
-                err_txt = f"❌ Kaydetme hatasi:\n<code>{e}</code>"
+                err_txt = f"❌ Kaydetme hatasi:\n<code>{_sanitize_title(e, fallback='Hata')}</code>"
                 if wait_id:
                     await edit_msg(http, chat_id, wait_id, err_txt)
                 else:
@@ -1248,7 +1242,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 await send_msg(
                     http,
                     chat_id,
-                    "Ses/video gonderin, yanitlayip <code>/oynat</code> yazin veya <code>/oynat &lt;kayitli_ad&gt;</code> kullanin.",
+                    "Ses gonderin, yanitlayip <code>/oynat</code> yazin veya <code>/oynat &lt;kayitli_ad&gt;</code> kullanin.",
                     reply_to_message_id=msg_id,
                 )
                 return
@@ -1293,7 +1287,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 matched_audio = None
                 needle = arg_str.lower()
                 for tr in list_saved_tracks(100):
-                    t_title = str(tr.get("title") or "").lower()
+                    t_title = _sanitize_title(tr.get("title"), fallback="").lower()
                     t_src = str(tr.get("source") or "")
                     if needle in t_title and t_src and os.path.exists(t_src):
                         matched_audio = tr
@@ -1303,45 +1297,59 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                     await send_msg(
                         http,
                         chat_id,
-                        f"⚠️ Katalogda <code>{arg_str}</code> adinda kayitli sarki bulunamadi. Once <code>/kaydet</code> ile kaydedin veya sadece <code>/sunum</code> yazin.",
+                        f"⚠️ Katalogda <code>{_sanitize_title(arg_str, fallback='parca')}</code> adinda kayitli sarki bulunamadi.",
                         reply_to_message_id=msg_id,
                     )
                     return
 
+                m_title = _sanitize_title(matched_audio.get("title"), fallback="Parca")
                 wait_res = await send_msg(
                     http,
                     chat_id,
-                    f"🖼️🎵 <b>Gorsel ve <code>{matched_audio['title']}</code> birlestiriliyor...</b>",
+                    f"🖼️🎵 <b>Gorsel ve <code>{m_title}</code> birlestiriliyor...</b>",
                     reply_to_message_id=msg_id,
                 )
                 wait_id = (wait_res.get("result") or {}).get("message_id")
+                img_path: str | None = None
                 try:
                     img_path = await _download_tg_file_to_disk(http, target["photo"][-1]["file_id"], ".jpg", msg=target)
                     combo_path = os.path.join(DOWNLOAD_DIR, f"combo_{target['photo'][-1]['file_id'][-10:]}.mp4")
                     await _merge_photo_and_audio_to_mp4(img_path, matched_audio["source"], combo_path)
+                    try:
+                        if img_path and os.path.exists(img_path):
+                            os.remove(img_path)
+                    except OSError:
+                        pass
 
                     item = {
                         "kind": "video",
                         "source": combo_path,
-                        "title": f"{matched_audio['title']} (Gorselli)",
+                        "title": f"{m_title} (Gorselli)",
                         "duration": 86400,
                         "is_video": True,
                         "requested_by": requester,
                     }
+                    print(f"[YAYINA VERILIYOR] Chat={target_chat_id} | File={combo_path}", flush=True)
                     status, track = await maybe_await(start_or_enqueue(target_chat_id, [item]))
+                    t_title = _sanitize_title(track.get("title"), fallback=m_title)
                     gname = _get_group_name(target_chat_id)
                     done_txt = (
-                        f"🖼️🎵 <b>Gorsel + Sarki Yayinda ({gname}):</b> <code>{track['title']}</code>"
+                        f"🖼️🎵 <b>Gorsel + Sarki Yayinda ({gname}):</b> <code>{t_title}</code>"
                         if status == "playing"
-                        else f"📑 <b>Gorsel + Sarki Listeye Eklendi ({gname}):</b> <code>{track['title']}</code>"
+                        else f"📑 <b>Gorsel + Sarki Listeye Eklendi ({gname}):</b> <code>{t_title}</code>"
                     )
                     if wait_id:
                         await edit_msg(http, chat_id, wait_id, done_txt, reply_markup=player_control_markup())
                     else:
                         await send_msg(http, chat_id, done_txt, reply_markup=player_control_markup(), reply_to_message_id=msg_id)
                 except Exception as e:
+                    if img_path and os.path.exists(img_path):
+                        try:
+                            os.remove(img_path)
+                        except OSError:
+                            pass
                     print(f"[SUNUM+SES HATA] {e}", flush=True)
-                    err_txt = f"❌ Birlesik yayin olusturulamadi:\n<code>{e}</code>"
+                    err_txt = f"❌ Birlesik yayin olusturulamadi:\n<code>{_sanitize_title(e, fallback='Hata')}</code>"
                     if wait_id:
                         await edit_msg(http, chat_id, wait_id, err_txt)
                     else:
@@ -1412,7 +1420,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 )
                 return
             ok, info_msg = reorder_list(target_chat_id, int(parts[0]), int(parts[1]))
-            await send_msg(http, chat_id, info_msg if ok else f"⚠️ {info_msg}", reply_to_message_id=msg_id)
+            await send_msg(http, chat_id, _sanitize_title(info_msg, fallback="Guncellendi") if ok else f"⚠️ {_sanitize_title(info_msg, fallback='Hata')}", reply_to_message_id=msg_id)
             return
 
         if first_token in ("pause", "duraklat"):
@@ -1420,7 +1428,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 await maybe_await(pause_stream(target_chat_id))
                 await send_msg(http, chat_id, "⏸️ Yayin duraklatildi.", reply_to_message_id=msg_id)
             except Exception as e:
-                await send_msg(http, chat_id, f"⚠️ Hata:\n<code>{e}</code>", reply_to_message_id=msg_id)
+                await send_msg(http, chat_id, f"⚠️ Hata:\n<code>{_sanitize_title(e, fallback='Hata')}</code>", reply_to_message_id=msg_id)
             return
 
         if first_token in ("resume", "devam"):
@@ -1428,17 +1436,16 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 await maybe_await(resume_stream(target_chat_id))
                 await send_msg(http, chat_id, "▶️ Yayin devam ediyor.", reply_to_message_id=msg_id)
             except Exception as e:
-                await send_msg(http, chat_id, f"⚠️ Hata:\n<code>{e}</code>", reply_to_message_id=msg_id)
+                await send_msg(http, chat_id, f"⚠️ Hata:\n<code>{_sanitize_title(e, fallback='Hata')}</code>", reply_to_message_id=msg_id)
             return
 
         if first_token in ("skip", "atla"):
             nxt = await maybe_await(skip_track(target_chat_id))
-            await send_msg(
-                http,
-                chat_id,
-                f"⏭️ Siradaki: <b>{nxt['title']}</b>" if nxt else "⏹️ Sira bitti.",
-                reply_to_message_id=msg_id,
-            )
+            if nxt:
+                n_title = _sanitize_title(nxt.get("title"), fallback="Parca")
+                await send_msg(http, chat_id, f"⏭️ Siradaki: <b>{n_title}</b>", reply_to_message_id=msg_id)
+            else:
+                await send_msg(http, chat_id, "⏹️ Sira bitti.", reply_to_message_id=msg_id)
             return
 
         if first_token in ("stop", "dur"):
@@ -1450,6 +1457,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
     if combo and not text.startswith("/"):
         c_target = int(combo.get("target_chat_id") or target_chat_id)
         if combo.get("step") == "waiting_photo":
+            print(f"[1/2 GORSEL ALINIYOR] Chat={chat_id} | User={user_id}", flush=True)
             p_path = await _extract_photo_from_msg(http, msg)
             if p_path:
                 combo["photo_path"] = p_path
@@ -1457,7 +1465,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 await send_msg(
                     http,
                     chat_id,
-                    "✅ Gorsel alindi.\n🎵 <b>2/2 Adim:</b> Grup sohbetinden veya buradan <b>sarki dosyasi</b> gonderin ya da <b>kayitli sarki adi</b> yazin.",
+                    "✅ Gorsel alindi.\n🎵 <b>2/2 Adim:</b> <b>Sarki dosyasi</b> gonderin ya da <b>kayitli sarki adi</b> yazin.",
                     reply_to_message_id=msg_id,
                 )
             else:
@@ -1476,34 +1484,32 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
 
             media_obj = msg.get("audio") or msg.get("voice") or msg.get("document")
             if media_obj and _detect_media_kind(msg) == "audio":
+                print(f"[2/2 SES DOSYASI ALINIYOR] Chat={chat_id} | User={user_id}", flush=True)
                 file_name = (media_obj.get("file_name") or "").lower()
                 ext = os.path.splitext(file_name)[1] or ".mp3"
                 audio_path = await _download_tg_file_to_disk(http, media_obj["file_id"], ext, msg=msg)
-                audio_title = clean_track_title(extract_media_title(msg, media_obj=media_obj, local_path=audio_path), fallback="Ses")
+                audio_title = _sanitize_title(
+                    extract_media_title(msg, media_obj=media_obj, local_path=audio_path),
+                    fallback="Ses",
+                )
             elif text:
-                needle = text.lower()
+                needle = _sanitize_title(text, fallback="").lower()
                 for tr in list_saved_tracks(100):
-                    t_title = str(tr.get("title") or "").lower()
+                    t_title = _sanitize_title(tr.get("title"), fallback="").lower()
                     t_src = str(tr.get("source") or "")
-                    if needle in t_title and t_src and os.path.exists(t_src):
+                    if needle and needle in t_title and t_src and os.path.exists(t_src):
                         audio_path = t_src
-                        audio_title = str(tr.get("title") or text)
+                        audio_title = _sanitize_title(tr.get("title"), fallback=text)
                         break
                 if not audio_path:
                     await send_msg(
                         http,
                         chat_id,
-                        f"⚠️ Katalogda <code>{text}</code> bulunamadi. Ses dosyasi gonderin veya kayitli sarki adi yazin.",
+                        f"⚠️ Katalogda <code>{_sanitize_title(text, fallback='parca')}</code> bulunamadi. Ses dosyasi gonderin veya kayitli sarki adi yazin.",
                         reply_to_message_id=msg_id,
                     )
                     return
             else:
-                await send_msg(
-                    http,
-                    chat_id,
-                    "⚠️ Lutfen 2. adim icin <b>sarki dosyasi</b> gonderin veya <b>kayitli sarki adi</b> yazin.",
-                    reply_to_message_id=msg_id,
-                )
                 return
 
             COMBO_SESSIONS.pop((chat_id, user_id), None)
@@ -1517,6 +1523,11 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
             try:
                 combo_path = os.path.join(DOWNLOAD_DIR, f"combo_{msg_id}_{user_id}.mp4")
                 await _merge_photo_and_audio_to_mp4(photo_path, audio_path, combo_path)
+                try:
+                    if photo_path and os.path.exists(photo_path):
+                        os.remove(photo_path)
+                except OSError:
+                    pass
 
                 item = {
                     "kind": "video",
@@ -1526,20 +1537,27 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                     "is_video": True,
                     "requested_by": requester,
                 }
+                print(f"[YAYINA VERILIYOR] Chat={c_target} | File={combo_path}", flush=True)
                 status, track = await maybe_await(start_or_enqueue(c_target, [item]))
+                t_title = _sanitize_title(track.get("title"), fallback=f"{audio_title} (Gorselli)")
                 gname = _get_group_name(c_target)
                 done_txt = (
-                    f"🖼️🎵 <b>Gorsel + Sarki Yayinda ({gname}):</b> <code>{track['title']}</code>"
+                    f"🖼️🎵 <b>Gorsel + Sarki Yayinda ({gname}):</b> <code>{t_title}</code>"
                     if status == "playing"
-                    else f"📑 <b>Gorsel + Sarki Listeye Eklendi ({gname}):</b> <code>{track['title']}</code>"
+                    else f"📑 <b>Gorsel + Sarki Listeye Eklendi ({gname}):</b> <code>{t_title}</code>"
                 )
                 if wait_id:
                     await edit_msg(http, chat_id, wait_id, done_txt, reply_markup=player_control_markup())
                 else:
                     await send_msg(http, chat_id, done_txt, reply_markup=player_control_markup(), reply_to_message_id=msg_id)
             except Exception as e:
+                if photo_path and os.path.exists(photo_path):
+                    try:
+                        os.remove(photo_path)
+                    except OSError:
+                        pass
                 print(f"[KOMBIN HATA] {e}", flush=True)
-                err_txt = f"❌ Birlesik yayin olusturulamadi:\n<code>{e}</code>"
+                err_txt = f"❌ Birlesik yayin olusturulamadi:\n<code>{_sanitize_title(e, fallback='Hata')}</code>"
                 if wait_id:
                     await edit_msg(http, chat_id, wait_id, err_txt)
                 else:

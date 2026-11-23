@@ -569,7 +569,7 @@ async def _finalize_slideshow(
             "kind": "video",
             "source": mp4_path,
             "title": f"Slayt Sunumu ({len(photos)} Gorsel)",
-            "duration": len(photos[:25]) * 6,
+            "duration": 86400,
             "is_video": True,
             "requested_by": requester,
         }
@@ -647,6 +647,8 @@ async def _handle_media_message(
             items = await maybe_await(
                 resolve_input_items(local_path, mode="image", requested_by=requester, custom_title=detected_title)
             )
+            for _it in items:
+                _it["duration"] = 86400
             status, track = await maybe_await(start_or_enqueue(target_chat_id, items))
             if status == "playing":
                 await send_msg(
@@ -1028,20 +1030,78 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
                 return
             kind = _detect_media_kind(src_msg) or "audio"
             ext = ".mp4" if kind == "video" else ".mp3"
-            local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], ext, msg=src_msg)
-            auto_title = extract_media_title(src_msg, media_obj=media_obj, local_path=local_path)
-            title = clean_track_title(arg_str or auto_title, fallback="Kayitli Parca")
-            rec = save_track_to_catalog(
-                {
-                    "kind": kind,
-                    "source": local_path,
-                    "title": title,
-                    "is_video": kind == "video",
-                    "requested_by": requester,
-                },
-                custom_title=title,
+            wait_res = await send_msg(
+                http,
+                chat_id,
+                "⏳ <b>Dosya indiriliyor ve yayina hazirlaniyor...</b>",
+                reply_to_message_id=msg_id,
             )
-            await send_msg(http, chat_id, f"💾 Kataloga kaydedildi: <code>{rec['title']}</code>", reply_to_message_id=msg_id)
+            wait_id = (wait_res.get("result") or {}).get("message_id")
+            try:
+                local_path = await _download_tg_file_to_disk(http, media_obj["file_id"], ext, msg=src_msg)
+                if kind == "video":
+                    opt_path = os.path.join(DOWNLOAD_DIR, f"opt_{media_obj['file_id'][-12:]}.mp4")
+                    proc = await asyncio.create_subprocess_exec(
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        local_path,
+                        "-vf",
+                        "scale='min(1280,iw)':-2",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "ultrafast",
+                        "-crf",
+                        "26",
+                        "-r",
+                        "24",
+                        "-g",
+                        "48",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "128k",
+                        "-movflags",
+                        "+faststart",
+                        opt_path,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await proc.communicate()
+                    if proc.returncode == 0 and os.path.exists(opt_path):
+                        try:
+                            os.remove(local_path)
+                        except OSError:
+                            pass
+                        local_path = opt_path
+
+                auto_title = extract_media_title(src_msg, media_obj=media_obj, local_path=local_path)
+                title = clean_track_title(arg_str or auto_title, fallback="Kayitli Parca")
+                rec = save_track_to_catalog(
+                    {
+                        "kind": kind,
+                        "source": local_path,
+                        "title": title,
+                        "is_video": kind == "video",
+                        "requested_by": requester,
+                    },
+                    custom_title=title,
+                )
+                done_txt = (
+                    f"💾 Kataloga kaydedildi: <code>{rec['title']}</code>\n"
+                    f"Listeye almak icin: <code>/video {rec['title']}</code> veya <code>/oynat {rec['title']}</code>"
+                )
+                if wait_id:
+                    await edit_msg(http, chat_id, wait_id, done_txt)
+                else:
+                    await send_msg(http, chat_id, done_txt, reply_to_message_id=msg_id)
+            except Exception as e:
+                err_txt = f"❌ Kaydetme hatasi:\n<code>{e}</code>"
+                if wait_id:
+                    await edit_msg(http, chat_id, wait_id, err_txt)
+                else:
+                    await send_msg(http, chat_id, err_txt, reply_to_message_id=msg_id)
             return
 
         if first_token in ("play", "oynat"):

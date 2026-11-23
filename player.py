@@ -218,6 +218,7 @@ async def run_protected_call(
                 delay = max(delay, 5.0)
 
             attempt += 1
+            print(f"[CALL RETRY {attempt}/{max_retries}] Chat {chat_id}: {exc}", flush=True)
             await asyncio.sleep(delay)
 
 
@@ -257,7 +258,7 @@ async def _resolve_playable_source(item: dict, volume_pct: int | None = None) ->
     if kind == "image":
         if not src or not os.path.exists(src):
             raise FileNotFoundError("Sunum icin gorsel dosyasi bulunamadi.")
-        duration_sec = int(item.get("duration_sec") or 30)
+        duration_sec = int(item.get("duration_sec") or duration or 86400)
         mp4_path = await prepare_image_presentation(src, duration_sec=duration_sec)
         return mp4_path, True, title, duration or duration_sec
 
@@ -310,8 +311,10 @@ async def start_or_enqueue(
             try:
                 await _ensure_peer_resolved(chat_id)
                 stream = _build_stream(playable, is_video)
+                print(f"[PYTGCALLS PLAY] Chat: {chat_id} | Video: {is_video} | Dosya: {playable}", flush=True)
                 await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
-            except Exception:
+            except Exception as exc:
+                print(f"[PYTGCALLS PLAY HATA] Chat {chat_id}: {exc}", flush=True)
                 _cleanup_track_files(track)
                 NOW_PLAYING.pop(chat_id, None)
                 raise
@@ -364,9 +367,11 @@ async def skip_track(chat_id: int) -> dict | None:
                 NOW_PLAYING[chat_id] = track
                 await _ensure_peer_resolved(chat_id)
                 stream = _build_stream(playable, is_video)
+                print(f"[PYTGCALLS NEXT] Chat: {chat_id} | Video: {is_video} | Dosya: {playable}", flush=True)
                 await run_protected_call(chat_id, lambda: call_py.play(chat_id, stream))
                 return track
-            except Exception:
+            except Exception as exc:
+                print(f"[PYTGCALLS NEXT HATA] Chat {chat_id}: {exc}", flush=True)
                 _cleanup_track_files(nxt)
                 NOW_PLAYING.pop(chat_id, None)
                 continue

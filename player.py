@@ -34,6 +34,8 @@ _VIDEO_QUALITY = (
     else VideoQuality.HD_720p
 )
 
+_LOW_LATENCY_FFMPEG = "-preset ultrafast -tune zerolatency -g 30 -r 24 -threads 2"
+
 
 def get_chat_volume(chat_id: int) -> int:
     return int(_CHAT_VOLUME.get(chat_id, 100))
@@ -185,17 +187,18 @@ async def run_protected_call(
     chat_id: int,
     coro_factory,
     *,
-    cooldown_sec: float = 1.5,
-    base_backoff: float = 3.0,
-    max_backoff: float = 30.0,
+    cooldown_sec: float = 0.0,
+    base_backoff: float = 1.5,
+    max_backoff: float = 15.0,
     max_retries: int = 3,
 ):
     loop = asyncio.get_running_loop()
-    now = loop.time()
-    last = _LAST_ATTEMPT.get(chat_id, 0.0)
-    elapsed = now - last
-    if elapsed < cooldown_sec:
-        await asyncio.sleep(cooldown_sec - elapsed)
+    if cooldown_sec > 0:
+        now = loop.time()
+        last = _LAST_ATTEMPT.get(chat_id, 0.0)
+        elapsed = now - last
+        if elapsed < cooldown_sec:
+            await asyncio.sleep(cooldown_sec - elapsed)
 
     attempt = 0
     while True:
@@ -210,9 +213,9 @@ async def run_protected_call(
             if not (is_conflict or is_flood) or attempt >= max_retries:
                 raise
 
-            delay = min(max_backoff, base_backoff * (2 ** attempt)) + random.uniform(0.3, 1.2)
+            delay = min(max_backoff, base_backoff * (2 ** attempt)) + random.uniform(0.1, 0.5)
             if is_flood:
-                delay = max(delay, 8.0)
+                delay = max(delay, 5.0)
 
             attempt += 1
             await asyncio.sleep(delay)
@@ -226,6 +229,7 @@ def _build_stream(source_url: str, is_video: bool) -> MediaStream:
             source_url,
             audio_parameters=AudioQuality.STUDIO,
             video_parameters=_VIDEO_QUALITY,
+            ffmpeg_parameters=_LOW_LATENCY_FFMPEG,
         )
     return MediaStream(
         source_url,
@@ -372,7 +376,6 @@ async def skip_track(chat_id: int) -> dict | None:
             await run_protected_call(
                 chat_id,
                 lambda: call_py.leave_call(chat_id),
-                cooldown_sec=1.5,
                 max_retries=1,
             )
         except Exception:
@@ -393,7 +396,6 @@ async def stop_stream(chat_id: int):
                 await run_protected_call(
                     chat_id,
                     lambda: call_py.leave_call(chat_id),
-                    cooldown_sec=1.5,
                     max_retries=1,
                 )
             except Exception:

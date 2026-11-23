@@ -558,7 +558,17 @@ async def _merge_photo_and_audio_to_mp4(photo_path: str, audio_path: str, out_pa
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr_bytes = await proc.communicate()
+    try:
+        _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=45)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.communicate()
+        except Exception:
+            pass
+        print("[FFMPEG TIMEOUT] Render Free suresinde tamamlanamadi (45s).", flush=True)
+        raise RuntimeError("Birlestirme zaman asimina ugradi (Render Free CPU/RAM siniri).")
+
     if proc.returncode != 0 or not os.path.exists(out_path):
         err_tail = (stderr_bytes or b"").decode("utf-8", errors="replace").strip().splitlines()
         short_err = err_tail[-1] if err_tail else "Bilinmeyen ffmpeg hatasi"
@@ -1585,7 +1595,7 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
 
 async def polling_loop(http: Any) -> None:
     global BOT_ID
-    await tg_call(http, "deleteWebhook", {"drop_pending_updates": False})
+    await tg_call(http, "deleteWebhook", {"drop_pending_updates": True})
     me_res = await tg_call(http, "getMe")
     me = me_res.get("result") or {}
     if me.get("id"):
@@ -1594,7 +1604,6 @@ async def polling_loop(http: Any) -> None:
     await _refresh_bot_groups(http)
 
     offset: int | None = None
-    conflict_streak = 0
     while True:
         try:
             params: dict[str, Any] = {
@@ -1609,17 +1618,13 @@ async def polling_loop(http: Any) -> None:
             if not data.get("ok"):
                 err_code = data.get("error_code")
                 desc = str(data.get("description") or "")
-                print(f"[GETUPDATES HATA] {data}", flush=True)
                 if err_code == 409 or "conflict" in desc.lower():
-                    conflict_streak += 1
-                    wait_sec = min(45.0, 6.0 * (2 ** min(conflict_streak - 1, 3)))
-                    await asyncio.sleep(wait_sec)
-                else:
-                    conflict_streak = 0
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(2)
+                    continue
+                print(f"[GETUPDATES HATA] {data}", flush=True)
+                await asyncio.sleep(2)
                 continue
 
-            conflict_streak = 0
             for upd in data.get("result", []):
                 upd_id = upd.get("update_id")
                 if upd_id is not None:
@@ -1634,7 +1639,7 @@ async def polling_loop(http: Any) -> None:
             break
         except Exception as e:
             print(f"[POLLING HATA] {e}", flush=True)
-            await asyncio.sleep(4)
+            await asyncio.sleep(2)
 
 
 async def start_web_server() -> None:

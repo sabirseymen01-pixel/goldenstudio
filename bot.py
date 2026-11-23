@@ -2,6 +2,7 @@ import asyncio
 import html
 import inspect
 import os
+import re
 import time
 from typing import Any
 import aiohttp
@@ -338,7 +339,8 @@ def _build_list_text(chat_id: int, user_id: int | None = None) -> str:
 
 
 def _strip_html_tags(raw: str) -> str:
-    return html.unescape(raw)
+    cleaned = re.sub(r"<[^>]+>", "", raw)
+    return html.unescape(cleaned)
 
 
 async def tg_call(http: Any, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -536,9 +538,12 @@ async def _merge_photo_and_audio_to_mp4(photo_path: str, audio_path: str, out_pa
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    _, stderr_bytes = await proc.communicate()
     if proc.returncode != 0 or not os.path.exists(out_path):
-        raise RuntimeError("Gorsel ve ses tek akista birlestirilemedi.")
+        err_tail = (stderr_bytes or b"").decode("utf-8", errors="replace").strip().splitlines()
+        short_err = err_tail[-1] if err_tail else "Bilinmeyen ffmpeg hatasi"
+        print(f"[FFMPEG STDERR] {' | '.join(err_tail[-4:])}", flush=True)
+        raise RuntimeError(f"Gorsel ve ses birlestirilemedi: {short_err}")
 
 
 async def _extract_photo_from_msg(http: Any, msg: dict[str, Any]) -> str | None:

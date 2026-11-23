@@ -1,4 +1,5 @@
 import asyncio
+import html
 import inspect
 import os
 import time
@@ -336,6 +337,10 @@ def _build_list_text(chat_id: int, user_id: int | None = None) -> str:
     return "\n".join(lines)
 
 
+def _strip_html_tags(raw: str) -> str:
+    return html.unescape(raw)
+
+
 async def tg_call(http: Any, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     url = f"{API_BASE}/{method}"
     async with http.post(url, json=payload or {}, timeout=35) as resp:
@@ -363,7 +368,14 @@ async def send_msg(
         body["reply_markup"] = reply_markup
     if reply_to_message_id:
         body["reply_to_message_id"] = reply_to_message_id
-    return await tg_call(http, "sendMessage", body)
+    res = await tg_call(http, "sendMessage", body)
+    desc = str((res or {}).get("description") or "").lower()
+    if not (res or {}).get("ok") and "can't parse entities" in desc:
+        plain_body = dict(body)
+        plain_body.pop("parse_mode", None)
+        plain_body["text"] = _strip_html_tags(text)
+        res = await tg_call(http, "sendMessage", plain_body)
+    return res
 
 
 async def edit_msg(
@@ -389,6 +401,12 @@ async def edit_msg(
     if not (data or {}).get("ok"):
         if "message is not modified" in desc:
             return {"ok": True, "result": True}
+        if "can't parse entities" in desc:
+            plain_body = dict(body)
+            plain_body.pop("parse_mode", None)
+            plain_body["text"] = _strip_html_tags(text)
+            async with http.post(url, json=plain_body, timeout=35) as resp2:
+                return await resp2.json()
         print(f"[TG API HATA] editMessageText: {data}", flush=True)
     return data
 

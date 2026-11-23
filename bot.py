@@ -521,19 +521,19 @@ async def _merge_photo_and_audio_to_mp4(photo_path: str, audio_path: str, out_pa
         "-i",
         audio_path,
         "-vf",
-        "scale='min(1280,iw)':-2,format=yuv420p",
+        "scale='min(640,iw)':-2,format=yuv420p",
         "-c:v",
         "libx264",
         "-preset",
         "ultrafast",
         "-crf",
-        "27",
+        "32",
         "-r",
-        "15",
+        "8",
         "-c:a",
         "aac",
         "-b:a",
-        "128k",
+        "64k",
         "-shortest",
         "-movflags",
         "+faststart",
@@ -1073,6 +1073,21 @@ async def handle_message(http: Any, msg: dict[str, Any]) -> None:
     reply_msg = msg.get("reply_to_message") or {}
     text_raw = msg.get("text") or msg.get("caption") or ""
     text = text_raw.strip()
+
+    has_media = bool(
+        msg.get("photo") or msg.get("video") or msg.get("audio") or msg.get("voice") or msg.get("document")
+    )
+    in_active_flow = bool(
+        user_id
+        and (
+            (chat_id, user_id) in COMBO_SESSIONS
+            or (chat_id, user_id) in SLIDE_COLLECTORS
+            or user_id in USER_MODE
+        )
+    )
+    if not text.startswith("/") and not has_media and not in_active_flow:
+        return
+
     print(f"[MESAJ GELDI] Chat: {chat_id} | User: {user_id} | Metin: {text}", flush=True)
 
     target_chat_id = chat_id if chat.get("type") != "private" else get_user_target_chat(user_id, chat_id)

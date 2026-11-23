@@ -451,10 +451,24 @@ async def _download_tg_file_to_disk(
             pass
 
         target_file = os.path.join(DOWNLOAD_DIR, f"tg_{file_id[-12:]}{suffix or '.mp4'}")
+        last_pct = {"val": -1}
+
+        async def _on_progress(current: int, total: int) -> None:
+            if total > 0:
+                pct = int((current * 100) / total)
+                if pct >= last_pct["val"] + 25 or pct == 100:
+                    last_pct["val"] = pct
+                    print(f"[ASISTAN INDIRME %] {pct}% ({current}/{total})", flush=True)
+
         print(f"[ASISTAN INDIRME BASLADI] Chat: {cid} | Msg: {message_id}", flush=True)
         try:
             tg_msg = await client.get_messages(cid, int(message_id))
-            downloaded = await client.download_media(tg_msg, file_name=target_file)
+            if not tg_msg or getattr(tg_msg, "empty", False):
+                raise RuntimeError("Asistan hedef mesaji bulamadi veya bos dondu.")
+            downloaded = await asyncio.wait_for(
+                client.download_media(tg_msg, file_name=target_file, progress=_on_progress),
+                timeout=240,
+            )
         except Exception as py_err:
             raise RuntimeError(f"Asistan indirme hatasi: {py_err}") from py_err
 

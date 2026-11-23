@@ -185,9 +185,9 @@ async def run_protected_call(
     chat_id: int,
     coro_factory,
     *,
-    cooldown_sec: float = 3.0,
-    base_backoff: float = 5.0,
-    max_backoff: float = 60.0,
+    cooldown_sec: float = 1.5,
+    base_backoff: float = 3.0,
+    max_backoff: float = 30.0,
     max_retries: int = 3,
 ):
     loop = asyncio.get_running_loop()
@@ -210,9 +210,9 @@ async def run_protected_call(
             if not (is_conflict or is_flood) or attempt >= max_retries:
                 raise
 
-            delay = min(max_backoff, base_backoff * (2 ** attempt)) + random.uniform(0.5, 2.0)
+            delay = min(max_backoff, base_backoff * (2 ** attempt)) + random.uniform(0.3, 1.2)
             if is_flood:
-                delay = max(delay, 12.0)
+                delay = max(delay, 8.0)
 
             attempt += 1
             await asyncio.sleep(delay)
@@ -372,7 +372,7 @@ async def skip_track(chat_id: int) -> dict | None:
             await run_protected_call(
                 chat_id,
                 lambda: call_py.leave_call(chat_id),
-                cooldown_sec=2.0,
+                cooldown_sec=1.5,
                 max_retries=1,
             )
         except Exception:
@@ -393,7 +393,7 @@ async def stop_stream(chat_id: int):
                 await run_protected_call(
                     chat_id,
                     lambda: call_py.leave_call(chat_id),
-                    cooldown_sec=2.0,
+                    cooldown_sec=1.5,
                     max_retries=1,
                 )
             except Exception:

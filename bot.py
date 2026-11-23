@@ -339,8 +339,9 @@ def _build_list_text(chat_id: int, user_id: int | None = None) -> str:
 
 
 def _strip_html_tags(raw: str) -> str:
-    cleaned = re.sub(r"<[^>]+>", "", raw)
-    return html.unescape(cleaned)
+    cleaned = re.sub(r"<[^>]*>", "", raw)
+    cleaned = html.unescape(cleaned)
+    return cleaned.replace("<", "").replace(">", "")
 
 
 async def tg_call(http: Any, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -373,6 +374,7 @@ async def send_msg(
     res = await tg_call(http, "sendMessage", body)
     desc = str((res or {}).get("description") or "").lower()
     if not (res or {}).get("ok") and "can't parse entities" in desc:
+        print(f"[HTML FALLBACK] {text[:120]!r}", flush=True)
         plain_body = dict(body)
         plain_body.pop("parse_mode", None)
         plain_body["text"] = _strip_html_tags(text)
@@ -404,6 +406,7 @@ async def edit_msg(
         if "message is not modified" in desc:
             return {"ok": True, "result": True}
         if "can't parse entities" in desc:
+            print(f"[HTML FALLBACK] {text[:120]!r}", flush=True)
             plain_body = dict(body)
             plain_body.pop("parse_mode", None)
             plain_body["text"] = _strip_html_tags(text)
